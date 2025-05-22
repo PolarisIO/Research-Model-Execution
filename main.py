@@ -2,10 +2,21 @@
 # coding=utf-8
 """
 Research Model Execution
-INSTRUCTIONS:
+DATA INSTRUCTIONS:
+
+CLIENT KEY ACCOUNT REGISTRATION:
+- ADD ENTITY_ACCOUNT_IDs to a CLIENT'S CLIENT_ENTITY_ACCOUNTS "ACTIVE", "INACTIVE"
+
+CLIENT MODEL REPORT REGISTRATION:
+- ADD A SUBSCRIPTION 
+- ADD A ENTITY_ACCOUNT_IDs to a CLIENT'S CLIENT_ENTITY_ACCOUNTS "ACTIVE", "INACTIVE"
+
+
+
+
+
 
 main.py
-
 *****************************************************************************************
 *****************************************************************************************
 *****************************************************************************************
@@ -33,9 +44,10 @@ VERSION HISTORY:
 from __future__ import print_function
 from python_services_v002 import Timer_Service, Perplexity_Service, File_Service, \
         AWS_Credentials_Service, Database_Service, Parsing_Service, Workflow_PL_Service, \
+        OpenAI_Service, LEADING_REPLACEMENT, TRAILING_REPLACEMENT, \
         console_input, ENV_DEV, ENV_QA, ENV_STAGE, ENV_PROD
         
-from datetime import datetime
+from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 import time
 import pandas as pd
@@ -72,7 +84,7 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # =================================================
 
 ROOT = 'pcederstrom'
-AI_ONEDRIVE = 'OneDrive - Polaris I O/Engineering - Documents/Operations/T-Mobile 2025 04 Product CMO Lookup'
+AI_ONEDRIVE = 'OneDrive - Polaris I O/Engineering - Documents/Operations/Client Research Reports'
 AI_LIMIT = 300  # formerly AI_MAX
 CATEGORY_LIST = ['Business Drivers', 'Business Strategies', 'Market Forces']
 MARKET_FORCES_LIST = ['Economy', 'Government', 'Competitors', 'Customers', 'Suppliers', 'Shareholders']
@@ -92,7 +104,6 @@ CHECK_CMO_COLUMNS = ['Industry','Account Name','CMO Name','Title','Status\nNew/C
 FULL_MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
 SHORT_MONTH_NAMES = ['Jan', 'Feb', 'Mar','Apr', 'May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
 # ============ INJECTION BLOCK
-OLD_DELIMITER = '$$'
 SYSTEM_YYYYMMDD = datetime.now().strftime("%Y-%m-%d")
 # ============================
 APPLICATION_ERROR = False
@@ -639,6 +650,7 @@ def tmobile_cleanse_string_date(input_value: any, output_format: str="%Y-%m-%d")
             exit(0)
         return "No Date", False
 
+"""
 def version_repair(sql: Type[Database_Service]):
     db_env = sql.aws.target_env
     query_dict = {'input_uuid':'01dea52c-b003-4327-9643-dd5317984696'}
@@ -660,13 +672,14 @@ def version_repair(sql: Type[Database_Service]):
             f"where id=%(id)s"
     print(query, query_dict)
     # success, result = sql.sql(query, query_dict=query_dict)
+"""
 
 def insert_client_subscription(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service], **kwargs):
     """
     Use this unit when making a new client subscription
     """
     ps: Type[Parsing_Service] = sql.aws.ps
-    client_id = ps.kwargs_manditory_lookup('client_id', **kwargs)
+    client_id = int(ps.kwargs_manditory_lookup('client_id', **kwargs))
     model_id = ps.kwargs_manditory_lookup('model_id', **kwargs)
     report_payload = ps.kwargs_lookup('report_payload', **kwargs)
     report_label = ps.kwargs_manditory_lookup('report_label', **kwargs)
@@ -703,7 +716,7 @@ def insert_client_subscription(sql: Type[Database_Service], wrkflw: Type[Workflo
     return key
 
 def report_writer(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service]):
-    query = f"Select t1.id as numeric_client_id, t2.model_id as model_id, " + \
+    query = f"Select t1.id as client_id, t2.model_id as model_id, " + \
             f"t2.state as state, t1.name as client_name, t2.report_label as report_label, " + \
             f"t3.name as model_name, t2.report_payload as report_payload from </$ua_clients$/> t1 " + \
             f"inner join </$client_subscriptions$/> t2 on t1.id = t2.client_id " + \
@@ -722,8 +735,12 @@ def report_writer(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service]
                 page_break_key = None
             
             query = report_payload['report_query']
-
-            wrkflw.add_replacement_pair('</numeric_client_id/>', str(report_row['numeric_client_id']))
+            if 'report_console' in report_payload.keys():
+                console_dict = report_payload['report_console']
+                value = console_input(console_dict['message'])
+                wrkflw.add_replacement_pair(console_dict['key'], value)
+                
+            wrkflw.add_replacement_pair('</client_id/>', report_row['client_id'])
             wrkflw.add_replacement_pair('</model_id/>', str(report_row['model_id']))
             
             query = wrkflw.solve_text_replacements(query)
@@ -737,7 +754,8 @@ def report_writer(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service]
             fs = File_Service()
             fs.print_current_path()
             fs.go_to_directory([ROOT, AI_ONEDRIVE])
-            out_file = f"{report_row['client_name']} {report_row['model_name']} Research Report {report_row['report_label']} {fs.ts.run_stamp} {fs.ts.run_stamp} .xlsx"
+            out_file = f"{report_row['client_name']} {report_row['model_name']} Research Report {report_row['report_label']} {fs.ts.run_stamp} {fs.ts.run_stamp}.xlsx"
+            out_file = wrkflw.solve_text_replacements(out_file)
             print(f"Writing: {out_file}")
             xl_memory = pd.ExcelWriter(out_file)
             pages_written = 0
@@ -765,78 +783,198 @@ def report_writer(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service]
             if page_df.shape[0] > 0 or pages_written == 0:
                 page_df.to_excel(xl_memory, sheet_name=last_page_break_value, columns=results_columns, index=False)
             xl_memory.close()
+
+def get_version_major_minor(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service], model_id: str) -> list:
+    version_dict = {'active_major': 0,'active_minor': 0, 'last_major': 0, 'last_minor':0}
+    tablename = wrkflw.solve_text_replacements('</$ai_model_versions$/>')
+    query = f"SELECT max(major) as max from {tablename} where ai_model_id = '{model_id}' and state = 'ACTIVE'"
+    success, df = sql.sql(query)
+    success, temp_dict = sql.df_to_dict(df)
+    if success:
+        major = int(temp_dict['max'])
+        query = f"SELECT max(minor) as max from  {tablename} where ai_model_id = '{model_id}' and major = {major} and state = 'ACTIVE'"
+        success, df = sql.sql(query)
+        success, temp_dict = sql.df_to_dict(df)
+        if success:
+            minor = int(temp_dict['max'])
+            version_dict['active_major'] = major
+            version_dict['active_minor'] = minor
+    query = f"SELECT max(major) as max from {tablename} where ai_model_id = '{model_id}'"
+    success, df = sql.sql(query)
+    success, temp_dict = sql.df_to_dict(df)
+    if success:
+        major = int(temp_dict['max'])
+        query = f"SELECT max(minor) as max from  {tablename} where ai_model_id = '{model_id}' and major = {major}"
+        success, df = sql.sql(query)
+        success, temp_dict = sql.df_to_dict(df)
+        if success:
+            minor = int(temp_dict['max'])
+            version_dict['last_major'] = major
+            version_dict['last_minor'] = minor
+    return version_dict
 
 def execute_research(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service]):
-    query = f"Select t1.id as numeric_client_id, t2.model_id as model_id, " + \
+    ps: Type[Parsing_Service] = sql.aws.ps
+    ts: Type[Timer_Service] = sql.aws.ts
+
+    # for all the active subscriptions identify the model and client_id
+    query = f"Select t1.id as client_id, t2.model_id as model_id, " + \
             f"t2.state as state, t1.name as client_name, t2.report_label as report_label, " + \
             f"t3.name as model_name, t2.report_payload as report_payload from </$ua_clients$/> t1 " + \
             f"inner join </$client_subscriptions$/> t2 on t1.id = t2.client_id " + \
             f"inner join </$ai_models$/> t3 on t3.id = t2.model_id " + \
             f"where t2.id in (Select max(id) from </$client_subscriptions$/> group by client_id, model_id, report_label)"
     query = wrkflw.solve_text_replacements(query)
-    print(query)
+    # print(query)
     success, report_df = sql.sql(query)
-    
-    exit(0)
+    model_list = []
     for report_index, report_row in report_df.iterrows():
         if report_row['state'] == 'ACTIVE':
-            report_payload = report_row['report_payload']
-            if 'report_break_key' in report_payload.keys():
-                page_break_key = report_payload['report_break_key']
-            else:
-                page_break_key = None
-            
-            query = report_payload['report_query']
+            model_list.append({'model_id': report_row['model_id'], 'client_id': report_row['client_id']})
 
-            wrkflw.add_replacement_pair('</numeric_client_id/>', str(report_row['numeric_client_id']))
-            wrkflw.add_replacement_pair('</model_id/>', str(report_row['model_id']))
-            
-            query = wrkflw.solve_text_replacements(query)
-            print("RUNNING REPORT WITH:")
-            print(query)
-            print("=============================")
-            success, results_df = sql.sql(query)
-            results_columns = results_df.columns.to_list()
+    # run each model
+    result_write_count = 0
+    ai_question_count = 0
+    for model_dict in model_list:
+        wrkflw.add_replacement_pair('</model_id/>', model_dict['model_id'])
+        wrkflw.add_replacement_pair('</client_id/>', model_dict['client_id'])
 
-            # setup the output_file
-            fs = File_Service()
-            fs.print_current_path()
-            fs.go_to_directory([ROOT, AI_ONEDRIVE])
-            out_file = f"{report_row['client_name']} {report_row['model_name']} Research Report {report_row['report_label']} {fs.ts.run_stamp} {fs.ts.run_stamp} .xlsx"
-            print(f"Writing: {out_file}")
-            xl_memory = pd.ExcelWriter(out_file)
-            pages_written = 0
+        # for each model get the latest version
+        version_dict = get_version_major_minor(sql, wrkflw, model_dict['model_id'])
+        tablename = wrkflw.solve_text_replacements('</$ai_model_versions$/>')
+        if 'active_major' in version_dict.keys() and 'active_minor' in version_dict.keys():
+            query = f"SELECT id, payload from {tablename} where ai_model_id = '{model_dict['model_id']}' and " + \
+                    f"major = {version_dict['active_major']} and minor = {version_dict['active_minor']}"
+            success, df = sql.sql(query)
+            success, temp_dict = sql.df_to_dict(df)
+            version_id = temp_dict['id']
+            wrkflw.add_replacement_pair('</version_id/>', version_id)
+            payload = temp_dict['payload']
+            workflow = payload['workflow']
+            prompt_template = ""
 
-            last_page_break_value = None
-            page_data=[]
-            for results_index, results_row in results_df.iterrows():
-                if page_break_key != None:
-                    if results_row[page_break_key] != last_page_break_value and last_page_break_value != None:
-                        # write out page
-                        page_df = pd.DataFrame(page_data, columns=results_columns)
-                        if page_df.shape[0] > 0:
-                            pages_written += 1
-                            page_df.to_excel(xl_memory, sheet_name=last_page_break_value, columns=results_columns, index=False)
-                        page_data = []
-                    last_page_break_value = results_row[page_break_key]
-                page_row = []
-                for col in results_columns:
-                    page_row.append(results_row[col])
-                page_data.append(page_row)
-            
-            if page_break_key == None or last_page_break_value == None or pages_written == 0:
-                last_page_break_value = "Report"
-            page_df = pd.DataFrame(page_data, columns=results_columns)
-            if page_df.shape[0] > 0 or pages_written == 0:
-                page_df.to_excel(xl_memory, sheet_name=last_page_break_value, columns=results_columns, index=False)
-            xl_memory.close()
+            # Execution Variables
+            driver_df = pd.DataFrame()
+            ai_engine = "OpenAI"
+            driver_replacement_list = []
+            system_missing_dict = {}
+            output_table_alias = '</$research_results$/>'
+            output_payload_keys = []
+
+            # Do the setup on for the model Version
+            for item in workflow:
+                # AI_DRIVER gets the agnostic information to drive the query
+                if 'AI_DRIVER' in item.keys():
+                    query = ps.dict_lookup('AI_DRIVER', item)
+                    query = wrkflw.solve_text_replacements(query)
+                    # print(query)
+                    success, driver_df = sql.sql(query)
+                elif 'REFERENCE_COLUMNS' in item.keys():
+                    driver_replacement_list = ps.dict_lookup('REFERENCE_COLUMNS', item)
+                elif 'SYSTEM_MISSING' in item.keys():
+                    system_missing_dict = ps.dict_lookup('SYSTEM_MISSING', item)
+                elif 'PERPLEXITY' in item.keys():
+                    prompt_template = ps.dict_lookup('PERPLEXITY', item)
+                    ai_engine = "Perplexity"
+                elif 'OPENAI' in item.keys():
+                    prompt_template = ps.dict_lookup('OPENAI', item)
+                    ai_engine = "OpenAI"
+                elif 'INSERT_TABLE' in item.keys():
+                    output_table_alias = ps.dict_lookup('INSERT_TABLE', item)
+                elif 'INSERT_PAYLOAD' in item.keys():
+                    output_payload_keys = ps.dict_lookup('INSERT_PAYLOAD', item)
+                else:
+                    print(f'execute_research: BAD WORKFLOW COMMAND', item)
+                    exit(0)
+            if ai_engine == 'OpenAI':
+                ai_client = OpenAI_Service(sql.aws)
+            elif ai_engine == 'Perplexity':
+                ai_client = Perplexity_Service(sql.aws)
+
+            # RUN THROUGH THE DRIVER FILE NOW
+            for r_index, r_row in driver_df.iterrows():
+                # print("r_row:", "\n", r_row, "\n")
+                # check the date
+                research_date = r_row['research_date']
+                check_date_object = datetime.strptime(research_date, "%Y-%m-%d") + timedelta(days=int(r_row['min_resting_days']))
+
+                if check_date_object < ts.app_start_time:
+                    if ai_question_count % 5 == 0:
+                        print(f"research_execution Loop timer {sql.aws.ts.stopwatch()}: {ai_question_count} ai questions asked " + \
+                              f"{result_write_count} result rows written  {model_dict['model_id']}")
+                    wrkflw.add_replacement_pair('</entity_metadata_id/>', r_row['entity_metadata_id'])
+                    # replace each of the items
+                    for replacement_item in driver_replacement_list:
+                        value = r_row[replacement_item]
+                        if value is None:
+                            if replacement_item in system_missing_dict:
+                                value = system_missing_dict[replacement_item]
+                        wrkflw.add_replacement_pair(replacement_item, value)
+                    prompt = wrkflw.solve_text_replacements(prompt_template)
+                    # print(prompt)
+                    ai_question_count += 1
+                    response = ai_client.submit_inquiry(prompt)
+                    # print(response)
+                    success, json_response = ps.json_from_var(response)
+
+                    if success:
+                        result_write_count += recursive_result_insert(sql, wrkflw, output_table_alias, output_payload_keys, "AI RESPONSE", json_response, )
+                    else:
+                        # print(f"@@@@execute_research SKIPPING Verbose AI: {response}")
+                        pass
+
+                if ai_question_count > 2 and result_write_count > 2:
+                    break
+    print(f"research_execution Loop timer {sql.aws.ts.stopwatch()}: {ai_question_count} ai questions asked " + \
+        f"{result_write_count} result rows written  FINAL")
+
+def recursive_result_insert(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service], 
+                            output_table_alias: str, output_payload_keys: list, parent_key: str, 
+                            json_response: any) -> int:
+    """
+    return: rows_written
+    """
+    ps: Type[Parsing_Service]= sql.aws.ps
+    ts: Type[Timer_Service]= sql.aws.ts
+    rows_written = 0
+
+    try:
+        key_list = list(json_response.keys())
+    except:
+        return False
+    
+    if len(key_list) == 0:
+        return False
+    
+    success, found, missing = ps.verify_lists(output_payload_keys, key_list, compare='ALL')
+    if success:
+        # build the payload
+        payload = {}
+        for key, value in json_response.items():
+            if key in output_payload_keys:
+                payload[key] = value
+        # build the record and insert
+        if output_table_alias == '</$research_results$/>':
+            model_id = wrkflw.solve_text_replacements('</model_id/>')
+            version_id = wrkflw.solve_text_replacements('</version_id/>')
+            entity_metadata_id = wrkflw.solve_text_replacements('</entity_metadata_id/>')
+            output_table_name = wrkflw.solve_text_replacements('</$research_results$/>')
+            data_dict = {'model_id': model_id, 'version_id':version_id, 'entity_metadata_id': entity_metadata_id,
+                         'research_date': ts.run_stamp_YYYYMMDD, 'result_success': True, 'results': payload, 
+                         'user_feedback': {}}
+            success, key = sql.insert_from_dict(table=output_table_name, key_columns=['id'],
+                                                data_columns=list(data_dict.keys()), data_dict=data_dict)
+            rows_written += 1
+    else:
+        for key, value in json_response.items():
+            rows_written += recursive_result_insert(sql, wrkflw, output_table_alias, output_payload_keys, key, value)
+    
+    return rows_written
 
 # =========================
 # =========================
-
+"""
 def product_data_migration(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service]):
-    db_env = sql.aws.target_env
-    print(wrkflw.replace_dict)
     tablename = wrkflw.replace_dict['</$ai_models$/>']
     result_count = 0
     desc = '''This research model identifies product information that can be used for:
@@ -857,17 +995,20 @@ By combining these insights effectively, the commercial team can better support 
                                     'description' : desc, 'state': 'ACTIVE'})
     
     tablename = wrkflw.replace_dict['</$ai_model_versions$/>']
-    gather_query = f"select t2.payload->>'industry' as industry, t2.entity_name as business, " + \
-                f"max(t1.results->>'product_announcement_date') as trigger_date " + \
-                f"from </$research_results$/> t1 " + \
-                f"inner join </$entity_metadata$/> t2 on t2.id = t1.entity_metadata_id " + \
-                f"inner join </$client_entity_accounts$/> t3 on t2.id = t3.entity_metadata_id " + \
-                f"where t3.client_id = '</numeric_client_id/>' and t1.model_id = '</model_id/>' " + \
-                f"order by industry, entity_name"
+    gather_query = f"select t3.entity_metadata_id, t3.min_resting_days, t2.payload->>'industry' as industry, " + \
+                f"t2.entity_name as business, t4.max1 as product_announcement_yymmdd, " + \
+                f"t4.max1 as research_date " + \
+                f"from </$research_drivers$/> t3 " + \
+                f"left join </$entity_metadata$/> t2 on t2.id = t3.entity_metadata_id " + \
+                f"right join </$client_entity_accounts$/> t5 on t5.entity_metadata_id = t3.entity_metadata_id " + \
+                f"left join (select t1.entity_metadata_id, max(t1.results->>'product_announcement_yymmdd') as max1, " + \
+                f"max(t1.research_date') as max2," + \
+                f"from </$research_results$/> t1 group by 1) t4 on t4.entity_metadata_id  = t3.entity_metadata_id " + \
+                f"where t3.model_id = '</model_id/>' and t5.state = 'ACTIVE' and t5.client_id = </client_id/>"
     prompt = f'### RULES ###\n Do not wrap the json codes in JSON markers. ' + \
              f'Respond in a JSON format where each product found has an item key of product, '+ \
              f"and a value that is a dictionary of 'product_name', 'announcement_date', 'citation_url', 'details'.\n" + \
-             f'### EXECUTE ###\n Has </business/> from the </industry/> industry, ' +\
+             f'### EXECUTE ###\n Has </business/> from the </industry/> industry, ' + \
              f'had any product launches specifically since </trigger_date/>?'
     version_payload = {'workflow': [{'sql_driver': gather_query}, 
                                     {'driver_keys': ['business', 'industry', 'trigger_date']}, 
@@ -956,7 +1097,7 @@ By combining these insights effectively, the commercial team can better support 
                                    'evidence': product_evidence}
 
                 success, key = sql.insert(table=results_tablename, 
-                                          data={'model_id': model_uuid, 'version_id': version_uuid, 'driver_id': driver_id, 
+                                          data={'model_id': model_uuid, 'version_id': version_uuid, 
                                                 'entity_metadata_id': entity_uuid, 'result_success': result_success,
                                                 'research_date': '2025-04-02',
                                                 'results': payload, 'user_feedback': {}})
@@ -984,7 +1125,7 @@ By combining these insights effectively, the commercial team can better support 
                                    'evidence': product_evidence}
 
                 success, key = sql.insert(table=results_tablename, 
-                                          data={'model_id': model_uuid, 'version_id': version_uuid, 'driver_id': driver_id, 
+                                          data={'model_id': model_uuid, 'version_id': version_uuid, 
                                                 'entity_metadata_id': entity_uuid, 'result_success': result_success,
                                                 'research_date': '2025-04-02',
                                                 'results': payload, 'user_feedback': {}})
@@ -1002,11 +1143,12 @@ By combining these insights effectively, the commercial team can better support 
                                'product_announcement_date': product_announcement_date, 'product_announcement_yymmdd': product_announcement_yymmdd, 
                                'evidence': product_split_date_evidence[1]}
                     success, key = sql.insert(table=results_tablename, 
-                                            data={'model_id': model_uuid, 'version_id': version_uuid, 'driver_id': driver_id, 
+                                            data={'model_id': model_uuid, 'version_id': version_uuid, 
                                                     'entity_metadata_id': entity_uuid, 'result_success': result_success,
                                                     'research_date': '2025-04-02',
                                                     'results': payload, 'user_feedback': {}})
     return model_uuid
+"""
 
 """
 def repair_results(sql: Type[Database_Service]):
@@ -1025,6 +1167,61 @@ def repair_results(sql: Type[Database_Service]):
             print(query, query_dict)
             success, df = sql.sql(query=query, query_dict=query_dict)
 """
+
+def entity_metadata_linking(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service]):
+    aws: Type[AWS_Credentials_Service]=sql.aws
+    ps: Type[Parsing_Service] = aws.ps
+
+    # CHECK pio.entity_master against the entity_metadata
+    entity_tablename = wrkflw.solve_text_replacements('</$entity_metadata$/>')
+    alias_tablename = wrkflw.solve_text_replacements('</$entity_aliases$/>')
+    query = f"SELECT t1.id as pio_entity_master_id, t1.entity_name as entity_name, t1.country as country FROM pio.entity_master t1 " + \
+            f"where t1.id not in (select t2.pio_entity_master_id from {alias_tablename} t2)"
+    success, df_new_corpview = sql.sql(query)
+
+    result_count = 0
+    for corpview_index, corpview_row in df_new_corpview.iterrows():
+        result_count += 1
+        if result_count % 5 == 0:
+            print(f"product_data_migration Loop timer {aws.ts.stopwatch()}: {result_count} rows processed")
+        
+        # we have corpview accounts not in the alias table
+        corpview_id = corpview_row['pio_entity_master_id']
+        corpview_name = corpview_row['entity_name']
+        corpview_country = corpview_row['country']
+        query = f"select id, payload from {entity_tablename} where entity_name ilike %(col0)s"
+        query_dict = {'col0': corpview_name}
+        success, df_entity = sql.sql(query, query_dict=query_dict)
+        if success:
+            if df_entity.shape[0] == 0:
+                entity_id = uuid4()
+                corpview_payload = {'country': corpview_country}
+                insert_dict = {'id': entity_id, 'entity_type': 'BUSINESS', 'entity_name': corpview_name, 
+                               'payload': corpview_payload, 'state': 'ACTIVE'}
+                key_columns = ['id']
+                data_columns = list(insert_dict.keys())
+                success, key = sql.insert_from_dict(table=entity_tablename, key_columns=key_columns, 
+                                                    data_columns=data_columns, data_dict=insert_dict)
+                if not success:
+                    print(f"FATAL entity_metadata_linking: code:001 insert_from_dict")
+                    exit(0)
+                success, key = sql.sql(f"INSERT INTO {alias_tablename} (pio_entity_master_id, entity_metadata_id) VALUES " + \
+                                       f"({corpview_id}, '{entity_id}')")
+                if not success:
+                    print(f"FATAL entity_metadata_linking: code:002  INSERT INTO {alias_tablename}")
+                    exit(0)
+            else: 
+                success, entity_dict = sql.df_to_dict(df_entity)
+                if success:
+                    entity_id = entity_dict['id']
+                    payload = entity_dict['payload']
+                    payload['country'] = corpview_country
+                    query = f"UPDATE {entity_tablename} SET payload=%(col1)s where id=%(col0)s"
+                    query_dict = {'col0': entity_id, 'col1': json.dumps(payload)}
+                    success, result = sql.sql(query, query_dict=query_dict)
+                else:
+                    print(f"FATAL entity_metadata_linking: query:{query} query_dict:{query_dict}")
+                    exit(0)
 
 def federated_bulk_table_copy(source_sql: Type[Database_Service], src_table: str, target_sql: Type[Database_Service], target_table: str, drop_create=False):
     if target_sql.target_database == 'db_aurora' and target_sql.aws.target_env == 'prod':
@@ -1090,6 +1287,48 @@ def rebuild_lower_enviroment(sql: Type[Database_Service], wrkflw: Type[Workflow_
         print(query)
         success, key = sql.sql(query)
 
+def merge_metadata_entities(sql: Type[Database_Service], wrkflow: Type[Workflow_PL_Service], data: list|dict|pd.DataFrame):
+    ps: Type[Parsing_Service] = sql.aws.ps
+
+    if isinstance(data, list):
+        df = pd.DataFrame(data, columns=['keep','remove'])
+    elif isinstance(data, dict):
+        df = pd.DataFrame([[data['keep'], data['remove']]], columns=['keep','remove'])
+    else:
+        df = data.copy()
+
+    for df_index, df_row in df.iterrows():
+        #get remove payload
+        tablename = wrkflow.solve_text_replacements('</$entity_metadata$/>')
+        query = f"Select id, payload from {tablename} where id = '{df_row['remove']}"
+        success, result = sql.sql(query)
+        df_dict = sql.df_to_dict(result)
+        remove_payload = df_dict['payload']
+        # get keep payload
+        query = f"Select id, payload from {tablename} where id = '{df_row['keep']}"
+        success, result = sql.sql(query)
+        df_dict = sql.df_to_dict(result)
+        keep_payload = df_dict['payload']
+        #combine payloads
+        keep_payload = ps.dict_merge(keep_payload, remove_payload)
+        #update survivor
+        query = f"UPDATE {tablename} SET payload=%(col1)s where id=%(col0)s"
+        query_dict = {'col0': df_row['keep'], 'col1': json.dumps(keep_payload)}
+        success, result = sql.sql(query, query_dict=query_dict)
+        #remove
+        query = f"DELETE {tablename} where id='{df_row['remove']}'"
+        success, result = sql.sql(query)
+
+        # <\client_entity_accounts\>
+        #update
+        tablename = wrkflow.solve_text_replacements('</$client_entity_accounts$/>')
+        query = f"UPDATE {tablename} SET entity_metadata_id='{df_row['keep']}' where entity_metadata_id='{df_row['remove']}'"
+        success, result = sql.sql(query)
+
+        #<entity_aliases>
+        tablename = wrkflow.solve_text_replacements('</$entity_aliases$/>')
+        query = f"UPDATE {tablename} SET entity_metadata_id = '{df_row['keep']}' WHERE entity_metadata_id = '{df_row['remove']}'"
+        success, result = sql.sql(query)
 
 # **** MAIN **** MAIN **** MAIN **** MAIN **** MAIN **** MAIN **** MAIN **** MAIN **** MAIN **** MAIN **** MAIN ****
 # **** MAIN **** MAIN **** MAIN **** MAIN **** MAIN **** MAIN **** MAIN **** MAIN **** MAIN **** MAIN **** MAIN ****
@@ -1099,7 +1338,14 @@ def rebuild_lower_enviroment(sql: Type[Database_Service], wrkflw: Type[Workflow_
 # **** MAIN **** MAIN **** MAIN **** MAIN **** MAIN **** MAIN **** MAIN **** MAIN **** MAIN **** MAIN **** MAIN ****
 
 def main():
-    default_env = ENV_PROD
+    """
+    my_string = '0123456789012345678901234567890123456789'
+    print("my_string[0:1]", my_string[0:1])
+    print("my_string[10:11]", my_string[10:39])
+    print("my_string[10:2]", my_string[10:2])
+    """
+ 
+    default_env = ENV_DEV
     aws = AWS_Credentials_Service(default_env, "pcederstrom@polarisio.com", "Capella777c!")
     print(aws.ts.timestamp("Research Model Execution"))
     sql = Database_Service(aws, 'db_airflow')
@@ -1112,6 +1358,17 @@ def main():
     wrkflw.add_global_replacement_pair('</$research_drivers$/>',f'signal.{sql.aws.target_env}_research_drivers')
     wrkflw.add_global_replacement_pair('</$research_results$/>',f'signal.{sql.aws.target_env}_research_results')
     wrkflw.add_global_replacement_pair('</$client_entity_accounts$/>',f'signal.{sql.aws.target_env}_client_entity_accounts')
+    wrkflw.add_global_replacement_pair('</$entity_aliases$/>',f'signal.{sql.aws.target_env}_entity_aliases')
+
+    # ====================================================================================================
+    # THIS BLOCK OF CODE: COPIES DATA RDS PROD TABLES TO DEV for testing
+    rebuild_lower_enviroments_cmd_flag = False
+    if rebuild_lower_enviroments_cmd_flag:
+        print(aws.ts.timestamp("Start rebuild lower environments"))
+        rebuild_table_list = ['</$client_subscriptions$/>','</$ai_models$/>','</$ai_model_versions$/>','</$entity_metadata$/>',
+                              '</$research_results$/>','</$client_entity_accounts$/>','</$ua_clients$/>','</$research_drivers$/>',
+                              '</$entity_aliases$/>']
+        rebuild_lower_enviroment(sql, wrkflw, rebuild_table_list, aws.target_env)
 
     # ======================================================================================================
     # THIS BLOCK OF CODE: DELETES THE CURRENT target_env files and creates new ones from the tmobile history
@@ -1136,15 +1393,118 @@ def main():
         federated_bulk_table_copy(source_sql, "ua.clients", sql, "signal.dev_clients", False)
     """
 
+    # =============================================================================================================
+    # THIS BLOCK OF CODE: merges metadata_entity uuids to a single id removes the duplicates and propogates updates
+    merge_metadata_cmd_flag = False
+    if merge_metadata_cmd_flag:
+        columns = ['keep','remove']
+        data = [['b6cd2908-4c9a-4d98-9676-5c1bad7c9007','52a1949c-4afe-433b-ba7a-97eedc5cae02']]
+        merge_metadata_entities(sql, wrkflw, data)
+
     # ====================================================================================================
-    # THIS BLOCK OF CODE: COPIES DATA RDS PROD TABLES TO DEV for testing
-    rebuild_lower_enviroments_cmd_flag = False
-    if rebuild_lower_enviroments_cmd_flag:
-        print(aws.ts.timestamp("Start rebuild lower environments"))
-        rebuild_table_list = ['</$client_subscriptions$/>','</$ai_models$/>','</$ai_model_versions$/>','</$entity_metadata$/>',
-                              '</$research_results$/>','</$client_entity_accounts$/>','</$ua_clients$/>','</$research_drivers$/>']
-        target_env = ENV_PROD
-        rebuild_lower_enviroment(sql, wrkflw, rebuild_table_list, target_env)
+    # THIS BLOCK OF CODE: CHECKS Entity_metadata file against pio.entity_master and nvw_resp.entities
+    # 1) CHECKS CORPVIEW FOR NEW ACCOUNTS and ADDS THEM TO THE METADATA ENTRY and ALIAS TABLE
+    # 2) RUNS THROUGH THE METADATA ENTRY FILE and checks ILIKE against names 
+    # 3) USES OPENAI to VERIFY STRING MATCHES
+    # TODO [ ] NOT COMPLETE
+    corpview_cmd_flag = False
+    if corpview_cmd_flag:
+        uuid_cleanup_df = entity_metadata_linking(sql, wrkflw)
+
+    # ========================================================================================
+    # THIS BLOCK OF CODE:  MAKES A NEW AI_MODEL or RETRIEVES EXISTING and adds a NEW VERSION
+    make_ai_model_cmd_flag = False
+    # ====
+    if make_ai_model_cmd_flag:
+        where_dict = {
+            'name': 'New Products',
+            'model_type': 'RESEARCH'
+        }
+        model_tablename = wrkflw.solve_text_replacements('</$ai_models$/>')
+        version_tablename = wrkflw.solve_text_replacements('</$ai_model_versions$/>')
+        row_dict = sql.dict_row_where(model_tablename, where_dict)
+        print("AI_MODEL row_dict:", row_dict)
+        # if the where_dict was empty
+        row_dict['model_type'] = 'RESEARCH'
+        row_dict['state'] = 'ACTIVE'
+        row_dict['ai_model_category_id'] = 0
+        # uncomment target fields to insert/update
+        # row_dict['name'] = ""
+        """
+        # row_dict['description'] = '''WRITE YOUR DESCRIPTION HERE'''
+        """
+        if 'id' not in row_dict.keys(): 
+            row_dict['id'] = uuid4()
+            success, key = sql.insert(table=model_tablename, data=row_dict)
+        else:
+            success, key = sql.update(table=model_tablename, data=row_dict, where_key='id',
+                                      ignore=['updated_on','created_on'])
+
+        # ADD A NEW MODEL VERSION 
+        model_id = row_dict['id']
+        version_dict = get_version_major_minor(sql, wrkflw, model_id)
+        where_dict = {'ai_model_id': model_id, 'major': version_dict['last_major'], 'minor': version_dict['last_minor']}
+        row_dict = sql.dict_row_where(version_tablename, where_dict)
+        row_dict['id'] = uuid4()
+        row_dict['major'] = version_dict['last_major'] + 1
+        row_dict['minor'] = 0
+        # print('payload', type(row_dict['payload']))
+        # payload = json.loads(row_dict['payload'])
+        payload = row_dict['payload']
+        gather_query = f"select t3.entity_metadata_id as entity_metadata_id, t3.min_resting_days as min_resting_days, t2.payload->>'industry' as industry, " + \
+                f"t2.entity_name as business, t4.prod_yymmdd as product_announcement_yymmdd, " + \
+                f"t4.research_yymmdd as research_date " + \
+                f"from </$research_drivers$/> t3 " + \
+                f"left join </$entity_metadata$/> t2 on t2.id = t3.entity_metadata_id " + \
+                f"right join </$client_entity_accounts$/> t5 on t5.entity_metadata_id = t3.entity_metadata_id " + \
+                f"left join (select t1.entity_metadata_id, max(t1.results->>'product_announcement_yymmdd') as prod_yymmdd, " + \
+                f"max(t1.research_date) as research_yymmdd " + \
+                f"from </$research_results$/> t1 group by 1) t4 on t4.entity_metadata_id  = t3.entity_metadata_id " + \
+                f"where t3.model_id = '</model_id/>' and t5.state = 'ACTIVE' and t5.client_id = </client_id/>"
+        prompt = f'### RULES ###\n Do not wrap the json codes in JSON markers. ' + \
+             f"for each product found, create a python dictionary where the key of 'product' is the product's name, " + \
+             f"the key of 'details' are details about the product, " + \
+             f"the key of 'product_announcement_date' is the date associated with the product launch, " + \
+             f"the key of 'product_announcement_yymmdd' is the date associated with the product launch and is in the format of 'YYYY-MM-DD', " + \
+             f"the key of 'evidence' is the citation url. " + \
+             f"Respond in a json format where each product found becomes its own unique key and the value becomes the python dictionary.\n" + \
+             f"### EXECUTE ###\n Has '</business/>' from the </industry/> industry, " + \
+             f"had any product launches specifically since </product_announcement_yymmdd/>?"
+        payload['workflow'] = [{'AI_DRIVER': gather_query},
+                               {'REFERENCE_COLUMNS': ['industry', 'business', 'product_announcement_yymmdd']},
+                               {'SYSTEM_MISSING': {'product_announcement_yymmdd': "2025-01-01"}},
+                               {'PERPLEXITY': prompt},
+                               {'INSERT_TABLE': '</$research_results$/>'},
+                               {'INSERT_PAYLOAD': ['product','details','product_announcement_date', 'product_announcement_yymmdd','evidence']}
+                               ]
+        row_dict['payload'] = json.dumps(payload)
+        success, key = sql.insert(table=version_tablename, data=row_dict)
+        
+    # ========================================================================================
+    # THIS BLOCK OF CODE:  MAKES NEW REPORT BASED on MODEL and TAG
+    make_new_report_cmd_flag = True
+    if make_new_report_cmd_flag:
+        client_id = 40069
+        model_id = '8817731d-4d78-4bd9-a95a-fde482bf63ab'
+        report_label='Since </console_date/>'
+        status='ACTIVE'
+        # addiing a subscription
+        report_payload = {
+                        f"report_console": {'message': 'In the format of "YYYY-MM-DD", enter the research date to start the report!', "key":'</console_date/>'}, 
+                        f'report_query': f"select t2.payload->>'industry' as industry, t2.entity_name as entity_name, " + \
+                        f"t1.results->>'product_announcement_date' as product_announcement_date, " + \
+                        f"t1.results->>'product_announcement_yymmdd' as product_announcement_yymmdd, t1.results->'product' as product, " + \
+                        f"t1.results->>'details' as details, t1.results->>'evidence' as evidence, t1.results->>'notes' as notes, " + \
+                        f"t1.research_date as research_date " + \
+                        f"from </$research_results$/> t1 " + \
+                        f"inner join </$entity_metadata$/> t2 on t2.id = t1.entity_metadata_id " + \
+                        f"inner join </$client_entity_accounts$/> t3 on t2.id = t3.entity_metadata_id " + \
+                        f"where t3.client_id = </client_id/> and t1.model_id = '</model_id/>' " + \
+                        f"and t1.research_date >= '</console_date/>' " + \
+                        f"and t3.state = 'ACTIVE' " + \
+                        f"order by industry, entity_name, research_date;", 'report_break_key': 'industry'}
+        insert_client_subscription(sql, wrkflw, client_id=client_id, model_id=model_id, report_label=report_label,
+                                report_payload=report_payload, status=status)
 
     # ========================================================================================
     # THIS BLOCK OF CODE:  MAKES NEW REPORT MODELS OR INCREMENTS EXISTING SUBSCRIPTION OUTPUTS
@@ -1159,12 +1519,11 @@ def main():
                         f"from </$research_results$/> t1 " + \
                         f"inner join </$entity_metadata$/> t2 on t2.id = t1.entity_metadata_id " + \
                         f"inner join </$client_entity_accounts$/> t3 on t2.id = t3.entity_metadata_id " + \
-                        f"where t3.client_id = '</numeric_client_id/>' and t1.model_id = '</model_id/>' " + \
+                        f"where t3.client_id = </client_id/> and t1.model_id = '</model_id/>' " + \
                         f"and t3.state = 'ACTIVE' " + \
                         f"order by industry, entity_name, research_date;", 'report_break_key': 'industry'}
         insert_client_subscription(sql, wrkflw, client_id=40069, model_id=model_id, report_label='All History and Notes',
                                 report_payload=report_payload, status='ACTIVE')
-
 
     # ========================================================================================
     # THIS BLOCK OF CODE:  RUNS PERIODIC EXECUTION
@@ -1172,7 +1531,6 @@ def main():
     if run_research_cmd_flag:
         print(aws.ts.timestamp("Start RESEARCH EXECUTION"))
         execute_research(sql, wrkflw)
-
 
     # ========================================================================================
     # THIS BLOCK OF CODE:  MAKES OUTPUT REPORTS

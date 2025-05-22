@@ -11,7 +11,8 @@ import paramiko
 import base64
 import io
 import getpass
-from typing import TypeVar, Type
+from typing import TypeVar, Type, Union, Dict, List
+JSON = Union[Dict[str, any], List[any], int, str, float, bool, Type[None]]
 from openai import OpenAI
 import os
 from datetime import datetime
@@ -104,6 +105,63 @@ class Parsing_Service:
     def __init__(self):
         self.intel_found_token_list = []
         self.intel_found_token_dict = {} 
+
+    def json_from_var(self, json_var: any, return_object: bool=True) -> tuple[bool, JSON]:
+        """
+        converts a variable to json
+
+        Args:
+        my_json: The variable to convert.
+        return_object: True returns an object_json; False returns a json_array
+
+        Returns:
+        True if the variable is valid JSON, False otherwise.
+        empty_object_json = {}
+        empty_array_json = []
+
+        <class 'list'> Real List: [1, 2, 3, 'four', 'five']
+        <class 'str'>  Json List: [1, 2, 3, "four", "five"]
+        """
+
+        success = False
+        return_json = {}
+        
+        # print("json_translate_from_var:", type(json_var), json_var)
+
+        if isinstance(json_var, list) or isinstance(json_var, dict):
+            json_var = json.dumps(json_var)
+
+        if isinstance(json_var, str):
+            # sometimes AI just returns json embedding
+            if len(json_var) > 10:
+                if json_var[0:7] == "```json":
+                    json_var = json_var[7:-3]   
+            if len(json_var) > 12: 
+                if json_var[0:9] == "```python":
+                    json_var = json_var[9:-3]  
+            try:
+                return_json = json.loads(json_var)
+                success = True
+            except:
+                pass
+        return success, return_json
+
+    def list_append_unique(self, list1: list, list2: list) -> list:
+        set1 = set(list1)
+        set2 = set(list2)
+        combined_set = set1.union(set2)
+        return list(combined_set)
+
+    def dict_lookup(self, term: str, term_dict: dict, default=None) -> str|list|dict|pd.DataFrame:
+        if term in term_dict.keys():
+            return term_dict[term]
+        return default
+
+    def dict_manditory_lookup(self, term: str, term_dict: dict, default=None) -> str|list|dict|pd.DataFrame:
+        if term not in term_dict.keys():
+            print(f'FATAL ERROR: dict_manditory_lookup: {term} {term_dict}')
+            exit(0)
+        return self.kwargs_lookup(term, term_dict, default)
     
     def kwargs_lookup(self, term: str, **kwargs) -> str|list|dict|pd.DataFrame:
         if term in kwargs.keys():
@@ -139,6 +197,12 @@ class Parsing_Service:
             else:
                 return False
         return kwarg_value
+    
+    def dict_merge(self, target_dict: dict, source_dict: dict) -> dict:
+        dict1 = target_dict.copy()
+        for key, value in source_dict.items():
+            dict1[key] = value
+        return dict1
             
     def selective_remove_from_dict(self, input_dict: dict, remove_key_list: list=[], remove_value_list: list=[None]):
         # removes unwanted key_value pairs
@@ -690,11 +754,12 @@ class Parsing_Service:
         
 class Timer_Service:
     def __init__(self):
-        self.reset_stopwatch()
+        self.stopwatch_start_time = datetime.now()
         self.app_start_time = self.stopwatch_start_time
         self.run_stamp = self.app_start_time.strftime("%Y %m %d %Hh%Mm%Ss")
         self.run_stamp_YYYYMMDD = self.app_start_time.strftime("%Y-%m-%d")
-    
+        self.reset_stopwatch()
+
     def reset_stopwatch(self):
         self.stopwatch_start_time = datetime.now()
 
@@ -972,8 +1037,8 @@ class Replacement_Service:
 
 class Database_Service:
     def __init__(self, aws: Type[AWS_Credentials_Service], target_database='db_aurora'):
-        self.aws = aws
-        self.ps = aws.ps
+        self.aws: Type[AWS_Credentials_Service] = aws
+        self.ps: Type[Parsing_Service] = aws.ps
 
         self.target_database = target_database
         self.secret_dict_db = self.aws.aws_get_secret(self.aws.secret_env_keys[self.target_database])
@@ -999,6 +1064,8 @@ class Database_Service:
             exit(0)
         self.information_schema_dict = {}
         self.system_injection_dict = {}
+        self.pop_index = 0
+        self.pop_replacements_dict = {}
         self.reset_system_injection_dict()
     
     def build_create(self, target_table: str, key_list: list, column_list: list, column_df: pd.DataFrame) -> str:
@@ -1014,7 +1081,7 @@ class Database_Service:
             query = query[:-2] + "))"
         else:    
             query = query[:-2] + ")"
-        print(query)
+        print("build_create:", query)
         return query
 
     def reset_system_injection_dict(self) -> dict:
@@ -1180,12 +1247,30 @@ class Database_Service:
         print(f'get_information_schema: BAD RESULT:', success, key_column_list, column_list)
         exit(0)
     
-    def dict_to_dict_copy_key(self, target_dict: dict, copy_key: str, **kwargs) -> dict:
+    def kwargs_to_dict_copy_key(self, target_dict: dict, copy_key: str, **kwargs) -> dict:
         value = self.ps.kwargs_lookup(copy_key, **kwargs)
         if value != None:
             target_dict[copy_key] = kwargs[copy_key]
         return target_dict
-
+    
+    def update(self, **kwargs) -> tuple[bool, any]:
+        tablename: str = self.ps.kwargs_manditory_lookup('table', **kwargs)
+        where_key: str = self.ps.kwargs_manditory_lookup('where_key', **kwargs)
+        data_dict: dict = self.ps.kwargs_manditory_lookup('data', **kwargs)
+        exclude_list: list = self.ps.kwargs_lookup('ignore', **kwargs)
+        query_dict = {}
+        query = f"UPDATE {tablename} SET "
+        index = 0
+        for key, value in data_dict.items():
+            if key != where_key and key not in exclude_list:
+                tag = f"col{index}"
+                query += f"{key} = %({tag})s, "
+                query_dict[tag] = value
+            index += 1
+        query = query[:-2] + f" where {where_key} = %(col_key)s"
+        query_dict['col_key'] = data_dict[where_key]
+        return self.execute_query(query=query, query_dict=query_dict)
+    
     def insert(self, **kwargs):
         """
         table='schema.table'
@@ -1706,7 +1791,7 @@ class Database_Service:
         while index < len(word_list):
             token = word_list[index]
             upper_token = str(token).upper()
-
+            
             if upper_token in stop_list:
                 if len(held_list):
                     if len(held_list) == 2:
@@ -1727,6 +1812,10 @@ class Database_Service:
                 elif upper_token in skip_list:
                     pass
                 else:
+                    """
+                    if token in self.pop_replacements_dict.keys():
+                        token = str(self.pop_replacements_dict[token]).strip("()")
+                    """
                     held_list.append(token)
 
             # process table_reference area
@@ -1743,7 +1832,7 @@ class Database_Service:
         return output_list
     
     def sql_to_token_dict(self, query) -> dict:
-        parent_token_dict = self.aws.ps.text_to_token_dict(query, word_inclusion='_@.')
+        parent_token_dict = self.ps.text_to_token_dict(query, word_inclusion='_@.()')
         """
         3: {'term': 'results', 'type': 'term'}, 
         4: {'term': '-', 'type': 'delimiter'}, 
@@ -1807,7 +1896,7 @@ class Database_Service:
         return token_dict
 
     def get_table_list(self, token_dict: dict) -> tuple[list, dict]:
-        # [] TODO Subqueries
+        # [?X? DONE?] TODO Subqueries
         table_pairs = self.token_dict_sql_pairs(token_dict,
                                                 ['FROM', 'INTO', 'UPDATE', 'JOIN'],
                                                 ['SELECT','(SELECT','WHERE', 'SET', 'ORDER', 'GROUP', 'ON', 'INNER'],
@@ -1823,10 +1912,11 @@ class Database_Service:
 
         return table_list, alias_dict
 
-    def map_table_columns_from_query(self, token_dict: dict) -> tuple[list, dict, dict]:
+    def map_table_columns_from_query(self, token_dict: dict, fetch_column: bool=True) -> tuple[list, dict, dict]:
         """
         return: table_list, alias_dict, column_dict
         """
+        # TODO [ ] - SELECT max(minor) as minor" -> is returning the alias as "max" not as "minor"
         # Keep the "." in an SQL statement also include "* for all columns"
         table_list, alias_dict = self.get_table_list(token_dict)
         word_list = token_dict['term_list']
@@ -1848,7 +1938,8 @@ class Database_Service:
                     split_col = str(column).split(".")
                     table_alias = split_col[0]
                     column = split_col[1]
-                columns_dict[full] = {'full': full, "alias": table_alias, 'column': column, 'rename': rename}
+                columns_dict[full] = {'full': full, "alias": table_alias, 'column': column, 'rename': rename, 
+                                      'fetch_column': fetch_column}
 
         # expand "*"
         new_columns_dict = {}
@@ -1866,32 +1957,33 @@ class Database_Service:
                         new_key = f"{col_item['alias']}.{explanding_col_item}"
                     else:
                         new_key = explanding_col_item
-                    new_columns_dict[new_key] = {'full': new_key, 'alias': col_item['alias'], 'column': explanding_col_item, 'rename': ''}
+                    new_columns_dict[new_key] = {'full': new_key, 'alias': col_item['alias'], 'column': explanding_col_item, 
+                                                 'rename': '', 'fetch_column': fetch_column}
             else:
                 new_columns_dict[col_key] = col_item    
         return table_list, alias_dict, new_columns_dict
-    
-    def nested_subqueries_dict(self, query: str) -> dict:
-        query_list = query.replace("(select","(SELECT").replace("(Select","(SELECT")
-        split_query = query_list.split("(SELECT")
-        initial_query = split_query[0]
-        replacement_dict = {}
-        index = 1
-        while index < len(split_query):
-            next_query = split_query[index].strip()
-            count_open = next_query.count("(")
-            count_close = next_query.count(")")
-            # print(next_query[-1:],count_open,count_close)
-            if next_query[-1:] == ")" and count_open == count_close - 1:
-                tag=f'</subquery{index}/>'
-                initial_query += "(" + tag + ")"
-                replacement_dict[tag] = "SELECT " + next_query[:-1]
-            else:
-                print(f"index:{index}   split_query:{split_query}")
-                print(f"FATAL nested_subqueries_dict: DEV ERROR - {query}")
-                exit(0)
-            index += 1
-        return {'cleansed_query': initial_query, 'replacements': replacement_dict}
+     
+    def popped_pairs(self, text: str, leading:str = "(", trailing:str = ")") -> list:
+        popped_pairs = []
+        leading_position_list = []
+        offset_count = 0
+        position = 0
+        while position < len(text):
+            if text[position] == leading:
+                leading_position_list.append(position)
+            if text[position] == trailing:
+                pop_start = leading_position_list.pop()
+                pop_end = position + 1
+                popped_pairs.append({'start': pop_start, 'end': pop_end})
+            position += 1
+        if len(leading_position_list) > 1:
+            print(f"FATAL popped_pairs mismatch:[{popped_pairs}, {leading_position_list}, {text}")
+            exit(0)
+        elif len(leading_position_list) == 1:
+            popped_pairs.append({'start': leading_position_list[0], 'end': len(text)+1})
+
+        # print(f"popped_pairs EXIT:[{popped_pairs}, {leading_position_list}, {text}")
+        return popped_pairs
 
     def sql(self, *args, **kwargs) -> tuple[bool, pd.DataFrame | dict]:
         """
@@ -1899,51 +1991,77 @@ class Database_Service:
         optional keywords: 
         return  success:True|False, result_type:"df"|"dict", result
         """
-        # TODO: [ ] subqueries
 
         if len(args) > 1:
             print(f'FATAL Function sql: (Too many args) {args} {kwargs}')
             exit(0)
- 
+
         query = "" 
         for arg in args:
             query = arg
         if len(query) == 0:
-            query = self.kwargs_manditory_lookup('query', **kwargs)
+            query = self.ps.kwargs_manditory_lookup('query', **kwargs)
         data = self.ps.kwargs_lookup('data', **kwargs)
         query_dict = self.ps.kwargs_lookup('query_dict', **kwargs)
         columns_list = self.ps.kwargs_lookup('columns', **kwargs)
-        
-        subqueries_dict = self.nested_subqueries_dict(query)
-        # print("SQL:subqueries_dict", subqueries_dict)
-        token_dict = self.sql_to_token_dict(subqueries_dict['cleansed_query'])
-        # print("token_dict", token_dict)
-        table_list, alias_dict, columns_dict = self.map_table_columns_from_query(token_dict)
 
-        # print('table_list', table_list)
-        # print('alias_dict', alias_dict)
-        # print('columns_dict', columns_dict)
-        # print("++++++")
+        # reset the working variables for the sql
+        self.pop_index = 0
+        self.pop_replacements_dict = {}
+
+        query_analysis: list = str(query).upper().replace("(SELECT","( SELECT").split()
+        select_count = query_analysis.count('SELECT')
+        update_count = query_analysis.count('UPDATE')
+        insert_count = query_analysis.count('INSERT')
+        delete_count = query_analysis.count('DELETE')
+        drop_count = query_analysis.count('DROP')
+        create_count = query_analysis.count('CREATE')
+
+        # find the start and end positions of ( )
+        popped_pairs_list = self.popped_pairs(query)
+
+        # create a list of the popped pairs and add thier information to table and alias list
+        driving_query = query
+        ordered_pop_statements = []
+        for popped_pairs_dict in popped_pairs_list:
+            pop_tag = LEADING_REPLACEMENT + f'POP{self.pop_index}' + TRAILING_REPLACEMENT
+            self.pop_index += 1
+
+            start = popped_pairs_dict['start']
+            end = popped_pairs_dict['end']
+            sub_query = query[start:end]
+
+            for key, value in self.pop_replacements_dict.items():
+                sub_query = sub_query.replace(value, key)
+            self.pop_replacements_dict[pop_tag] = sub_query
+            ordered_pop_statements.append(pop_tag)
+        
+        # Take the query and do replacements on pop_tab list
+        for pop_tag in ordered_pop_statements:
+            driving_query = driving_query.replace(self.pop_replacements_dict[pop_tag],pop_tag)
+
+        token_dict = self.sql_to_token_dict(driving_query)
+        table_list, alias_dict, columns_dict = self.map_table_columns_from_query(token_dict, True)
+
+        """ 
+        print('table_list', table_list)
+        print('alias_dict', alias_dict)
+        print('columns_dict', columns_dict)
+        print('self.pop_replacements_dict', self.pop_replacements_dict)
+        print(f'select_count:{select_count}')
+        print("++++++")
+        """
 
         # build the columns list with the fetch_name (or rename)
         columns_list = []
         for key, value in columns_dict.items():
-            if len(value['rename']):
-                columns_list.append(value['rename'])
-            else: 
-                columns_list.append(value['full'])
+            if value['fetch_column']:
+                if len(value['rename']):
+                    columns_list.append(value['rename'])
+                else: 
+                    columns_list.append(value['full'])
+        # print("columns_list", columns_list)
 
-        #what type of query is this:
-        word_list = token_dict['term_list']
-        # print(word_list)
-        upper_word_list = [str(value).upper() for value in word_list]
-        # print(upper_word_list)
-        select_count = upper_word_list.count('SELECT')
-        update_count = upper_word_list.count('UPDATE')
-        insert_count = upper_word_list.count('INSERT')
-        delete_count = upper_word_list.count('DELETE')
-        drop_count = upper_word_list.count('DROP')
-        create_count = upper_word_list.count('CREATE')
         command_count = select_count + update_count + insert_count + delete_count + drop_count + create_count
 
         print_flag = False
@@ -1956,24 +2074,24 @@ class Database_Service:
             print(f'command_count:{command_count}')
 
         if command_count == 0:
-            print("FATAL ERROR - FUNCTION: SQL; Invalid Command: {query}")
+            print(f"FATAL ERROR - FUNCTION: SQL; Invalid Command: {query}")
             exit(0)
 
         if command_count == select_count:
             out_kwargs = {'query': query, 'data': data, 'columns': columns_list}
-            out_kwargs = self.dict_to_dict_copy_key(out_kwargs, 'query_dict', **kwargs)
+            out_kwargs = self.kwargs_to_dict_copy_key(out_kwargs, 'query_dict', **kwargs)
             out_kwargs = self.aws.ps.selective_remove_from_dict(out_kwargs)
             success, df = self.select_to_df(**out_kwargs)
             return success, df
             
         # DROP, DELETE, UPDATE, CREATE AS SELECT
-        if (command_count == 1 and (drop_count + delete_count + update_count) == 1) or \
+        if (command_count == 1 and (drop_count + delete_count + update_count + insert_count) == 1) or \
             (command_count == 2 and create_count == 1 and select_count == 1) or \
-            (command_count == 2 and insert_count == 1 and select_count == 1):
+            (command_count > 1 and insert_count == 1 and select_count == command_count - 1):
             return self.execute_query(query=query, query_dict=query_dict)
         
         if insert_count > 0:
-            print("FATAL ERROR - FUNCTION: SQL; INSERT CURRENTLY NOT SUPPORTED: {query}")
+            print(f"FATAL ERROR - FUNCTION: SQL; INSERT CURRENTLY NOT SUPPORTED: {query}")
             exit(0)
 
         if command_count > 1:
@@ -1988,7 +2106,26 @@ class Database_Service:
             return True, my_dict
         else:
             return False, df
-        
+    
+    def dict_row_where(self, tablename, where_dict) -> dict:
+        if where_dict == {}: return {}
+        query = f"SELECT * from {tablename} where "
+        query_dict = {}
+        item_count = 0
+        for key, value in where_dict.items():
+            if item_count > 0:
+                query += 'and '
+            tag = f"col{item_count}"
+            query += f"{key} = %({tag})s "
+            query_dict[tag] = value
+            item_count += 1
+        print("dict_row_where:", query, query_dict)
+        success, df = self.sql(query, query_dict=query_dict)
+        if not success: return {}
+        success, my_dict = self.df_to_dict(df)
+        if not success: return {}
+        return my_dict
+    
 class OpenAI_Service():
     def __init__(self, aws: Type[AWS_Credentials_Service], in_model: str="gpt-4o-mini"):
         self.aws = aws
@@ -2133,7 +2270,7 @@ class Perplexity_Service():
 
     # use this when you want to just ask a one-off or initial question
     def submit_inquiry(self, ask: str) -> str:
-        self.conversation_setup()
+        self.conversation = self.conversation_setup()
         return self.submit_dialog(ask)
     
     # use this when you want to continue having a conversation without managing the conversation
@@ -2153,7 +2290,6 @@ class Perplexity_Service():
         response = response_raw.choices[0].message.content
         return response
     
-
 class Workflow_PL_Service:
     """
     PL: Procedural language service is used to solve 
@@ -2224,7 +2360,12 @@ class Workflow_PL_Service:
         self.return_dict = {}
     
     def add_replacement_pair(self, key: str, value: str):
-        self.replace_dict[key] = value
+        ready_key = key
+        if LEADING_REPLACEMENT != ready_key[0:len(LEADING_REPLACEMENT)]:
+            ready_key = LEADING_REPLACEMENT + ready_key
+        if TRAILING_REPLACEMENT != ready_key[-len(TRAILING_REPLACEMENT):]:
+            ready_key = ready_key + TRAILING_REPLACEMENT
+        self.replace_dict[ready_key] = value
     
     def add_global_replacement_pair(self, key: str, value: str):
         self.global_replace_dict[key] = value
@@ -2252,7 +2393,7 @@ class Workflow_PL_Service:
         out_text = in_text
         for k1, v1 in self.replace_dict.items():
             if k1 in out_text:
-                out_text = out_text.replace(k1,v1)
+                out_text = out_text.replace(k1, str(v1))
         return out_text
 
     def fatal_error_check(self, success: bool, **kwargs):
