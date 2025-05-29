@@ -4,6 +4,8 @@ from botocore.exceptions import ClientError
 import json
 import math
 import sys
+from openpyxl import load_workbook
+import time
 
 import psycopg2
 from sshtunnel import SSHTunnelForwarder
@@ -161,18 +163,18 @@ class Parsing_Service:
         if term not in term_dict.keys():
             print(f'FATAL ERROR: dict_manditory_lookup: {term} {term_dict}')
             exit(0)
-        return self.kwargs_lookup(term, term_dict, default)
+        return self.dict_lookup(term, term_dict, default)
     
-    def kwargs_lookup(self, term: str, **kwargs) -> str|list|dict|pd.DataFrame:
+    def kwargs_lookup(self, term: str, default: str|list|dict|pd.DataFrame, **kwargs) -> str|list|dict|pd.DataFrame:
         if term in kwargs.keys():
             return kwargs[term]
-        return None
+        return default
 
     def kwargs_manditory_lookup(self, term: str, **kwargs) -> str|list|dict|pd.DataFrame:
         if term not in kwargs.keys():
             print(f'FATAL ERROR: kwargs_manditory_lookup: {term} {kwargs}')
             exit(0)
-        return self.kwargs_lookup(term, **kwargs)
+        return self.kwargs_lookup(term, None, **kwargs)
 
     def kwargs_get_value(self, key: str, **kwargs) -> any:
         """
@@ -386,6 +388,13 @@ class Parsing_Service:
                 statement = statement + write_item + ', '
             statement = statement[:-2]    
         return statement
+
+    def list_remove_elements(self, input_list: list, remove_list: list) -> list:
+        output_list = input_list.copy()
+        for remove_item in remove_list:
+            while remove_item in output_list:
+                output_list.remove(remove_item)
+        return output_list
 
     def list_reduce(input_list: list, **kwargs: str) -> list:
         inclusion_pattern_list=[]
@@ -829,8 +838,51 @@ class File_Service:
                     else:
                         success = False
         return success
+    
+    def dict_from_xlsx(self, match_prefix: str, sheet_name: str="") -> dict:
+        df = self.df_from_xlsx(match_prefix, sheet_name)
+        if df.shape[0] != 1:
+            print(f"File Service: dict_from_xls FATAL: one data row expected.  prefix:{match_prefix} sheet:{sheet_name}")
+            exit(0)
 
-    def get_file_list(self, match_prefix: str, match_suffix: str, error_out: bool=True) -> list:
+        my_dict = df.iloc[0].to_dict()
+        return my_dict
+    
+    def df_from_xlsx(self, match_prefix: str, sheet_name: str="") -> pd.DataFrame:
+        xlsx_file_list = self.get_file_list(match_prefix, "xlsx")
+        if len(xlsx_file_list) == 0:
+            print(f"File Service: df_from_xls FATAL: no files found.  prefix:{match_prefix} sheet:{sheet_name}")
+            exit(0)
+        xlsx_file_handle = pd.ExcelFile(xlsx_file_list[0])
+        xlsx_sheet_list = list(xlsx_file_handle.sheet_names)
+        if len(sheet_name):
+            if sheet_name not in xlsx_sheet_list:
+                print(f"File Service: df_from_xls FATAL: sheet not found.  prefix:{match_prefix} sheet:{sheet_name}")
+                exit(0)
+        else:
+            sheet_name = xlsx_sheet_list[0]
+        xlsx_df = pd.read_excel(xlsx_file_handle, sheet_name=sheet_name)
+        return xlsx_df
+    
+    def ExcelWriter_clone_latest_xlsx(self, match_prefix: str, exlude_worksheets: list=[]) -> str:
+        xlsx_file_list = self.get_file_list(match_prefix, "xlsx")
+        xlsx_target_file = f"{match_prefix} {self.ts.run_stamp}.xlsx"
+        print("xlsx_file_list", xlsx_file_list)
+        print("xlsx_target_file", xlsx_target_file)
+        if len(xlsx_file_list) > 0:
+            xlsx_target_handle = pd.ExcelWriter(xlsx_target_file)
+            xlsx_source_file = xlsx_file_list[0]
+            xlsx_source_file_handle = pd.ExcelFile(xlsx_source_file)
+            xlsx_sheet_list = list(xlsx_source_file_handle.sheet_names)
+            for xlsx_sheet in xlsx_sheet_list:
+                if xlsx_sheet not in exlude_worksheets:
+                    wip_df = pd.read_excel(xlsx_source_file, sheet_name=xlsx_sheet)
+                    wip_columns = wip_df.columns.tolist()
+                    wip_df.to_excel(xlsx_target_handle, sheet_name=xlsx_sheet, columns=wip_columns, index=False)
+            xlsx_target_handle.close()
+        return xlsx_target_file
+        
+    def get_file_list(self, match_prefix: str, match_suffix: str, include_zero_size: bool=False, error_out: bool=True) -> list:
         match_suffix = match_suffix.strip()
         match_prefix_length = len(match_prefix)
         match_list = []
@@ -842,12 +894,28 @@ class File_Service:
                     # matches things like xlsx, pdf
                     if fileword_list[-1] == match_suffix:
                         if str(str(fileword_list[0])[0:match_prefix_length]) == match_prefix:
-                            match_list.append(entry.name)
+                            # print(f"{str(entry.name)} size:{os.path.getsize(str(entry.name))}")
+                            if include_zero_size or os.path.getsize(str(entry.name)) > 0:
+                                match_list.append(entry.name)
         if len(match_list) == 0 and error_out:
             print("FATAL ERROR: No file found matching:", match_prefix, "<.>", match_suffix)
             exit(1)
         match_list.sort(reverse=True, key=str.upper)
         return match_list
+    
+    def retain_last_file(self, match_prefix: str, match_suffix: str) -> bool:
+        file_list = self.get_file_list(match_prefix, match_suffix, True)
+        # print(f"Candidates: {file_list}")
+        hold_file = file_list[0]
+        file_size_bytes = os.path.getsize(hold_file)
+        if file_size_bytes == 0:
+            print(f"File Service: retain_last_file WARNING: ALL Files kept. Last file empty.  prefix:{match_prefix} sheet:{match_suffix}")
+            return False
+        for rm_file in file_list:
+            if rm_file != hold_file:
+                # print(f"Removing file: {rm_file}")
+                os.remove(rm_file)
+        return True
 
     def json_file_to_df(self, file_name: str) -> tuple[bool, pd.DataFrame]:
         success = True
@@ -1248,7 +1316,7 @@ class Database_Service:
         exit(0)
     
     def kwargs_to_dict_copy_key(self, target_dict: dict, copy_key: str, **kwargs) -> dict:
-        value = self.ps.kwargs_lookup(copy_key, **kwargs)
+        value = self.ps.kwargs_lookup(copy_key, None, **kwargs)
         if value != None:
             target_dict[copy_key] = kwargs[copy_key]
         return target_dict
@@ -1257,7 +1325,7 @@ class Database_Service:
         tablename: str = self.ps.kwargs_manditory_lookup('table', **kwargs)
         where_key: str = self.ps.kwargs_manditory_lookup('where_key', **kwargs)
         data_dict: dict = self.ps.kwargs_manditory_lookup('data', **kwargs)
-        exclude_list: list = self.ps.kwargs_lookup('ignore', **kwargs)
+        exclude_list: list = self.ps.kwargs_lookup('ignore', [], **kwargs)
         query_dict = {}
         query = f"UPDATE {tablename} SET "
         index = 0
@@ -1383,34 +1451,14 @@ class Database_Service:
 
     def execute_query(self, **kwargs):
         # THIS FUNCTION RETURNS A CURSOR TO THE RESULT SET FROM THE QUERY
-        # ========================== DEBUG BLOCK
-        if DEBUG_SQL_ARGS:
-            v2eq_success, v2eq_message = validate_kwargs(['query'],
-                                                        ['query_dict', 'dump', 'columns', 'close', 'commit_rollback',
-                                                        'return_sequence'],
-                                                        **kwargs)
-            if not v2eq_success:
-                print("Fatal Error", f"EQ4 DEV ERROR (execute_query): invalid keyword:{v2eq_message}")
-        # ========================== DEBUG BLOCK
         self.refresh_cursor()
-        v2eq_dump = False
-        v2eq_return_sequence = False
-        v2eq_query_dict = {}
-        v2eq_close = True
-        v2eq_commit_rollback = True
-        for v2eq_key, v2eq_value in kwargs.items():
-            if v2eq_key == 'query':
-                v2eq_query = v2eq_value
-            elif v2eq_key == 'query_dict':
-                v2eq_query_dict = v2eq_value
-            elif v2eq_key == 'return_sequence':
-                v2eq_return_sequence = v2eq_value
-            elif v2eq_key == 'dump':
-                v2eq_dump = v2eq_value
-            elif v2eq_key == 'close':
-                v2eq_close = v2eq_value
-            elif v2eq_key == 'commit_rollback':
-                v2eq_commit_rollback = v2eq_value
+
+        v2eq_query = self.ps.kwargs_manditory_lookup('query', **kwargs)
+        v2eq_query_dict = self.ps.kwargs_lookup('query_dict', {}, **kwargs)
+        v2eq_return_sequence = self.ps.kwargs_lookup('return_sequence', False, **kwargs)
+        v2eq_dump = self.ps.kwargs_lookup('dump', False, **kwargs)
+        v2eq_close = self.ps.kwargs_lookup('close', True, **kwargs)
+        v2eq_commit_rollback = self.ps.kwargs_lookup('commit_rollback', True, **kwargs)        
                 
         v2eq_success = True
         v2eq_result = {}
@@ -1457,26 +1505,17 @@ class Database_Service:
         return v2eq_success, v2eq_result
 
     def active_cursor_fetchall_to_df(self, **kwargs):
-        # ========================== DEBUG BLOCK
-        if DEBUG_SQL_ARGS:
-            v2eq_success, v2eq_message = validate_kwargs(['columns'],
-                                                        ['dump', 'query', 'query_dict'],
-                                                        **kwargs)
-            if not v2eq_success:
-                print("Fatal Error", f"DEV ERROR (active_cursor_fetchall_to_df): invalid keyword:{v2eq_message}")
-        # ========================== DEBUG BLOCK
-        v2fa2df_dump = False
-        for v2fa2df_key, v2fa2df_value in kwargs.items():
-            if v2fa2df_key == 'columns':
-                v2fa2df_columns = v2fa2df_value
-            elif v2fa2df_key == 'dump':
-                v2fa2df_dump = v2fa2df_value
-        v2fa2df_success = True
+
+        v2fa2df_columns = self.ps.kwargs_manditory_lookup('columns', **kwargs)
+        v2fa2df_dump = self.ps.kwargs_lookup('dump', False, **kwargs)
+
         try:
             v2fa2df_result = self.cur.fetchall()
+            v2fa2df_success = True
         except Exception as err:
             v2fa2df_success = False
             v2fa2df_result = None
+
         v2fa2df_df = pd.DataFrame(columns=v2fa2df_columns, data=v2fa2df_result)
         if v2fa2df_dump:
             v2fa2df_row_count = 0
@@ -1487,22 +1526,13 @@ class Database_Service:
         return v2fa2df_success, v2fa2df_df.copy(deep=True)
 
     def active_cursor_fetchone_to_dict(self, **kwargs):
-        # ========================== DEBUG BLOCK
-        if DEBUG_SQL_ARGS:
-            v2eq_success, v2eq_message = validate_kwargs(['query', 'columns'], 
-                                                        ['query_dict', 'dump'], **kwargs)
-            if not v2eq_success:
-                print("Fatal Error", f"DEV ERROR (fetchall_to_dict): invalid keyword:{v2eq_message}")
-        # ========================== DEBUG BLOCK
-        v2fo2dict_dump = False
-        for v2fo2dict_key, v2fo2dict_value in kwargs.items():
-            if v2fo2dict_key == 'columns':
-                v2fo2dict_columns = v2fo2dict_value
-            elif v2fo2dict_key == 'dump':
-                v2fo2dict_dump = v2fo2dict_value
-        v2fo2dict_success = True
+
+        v2fo2dict_columns = self.ps.kwargs_manditory_lookup('columns', **kwargs)
+        v2fo2dict_dump = self.ps.kwargs_lookup('dump', False, **kwargs)
+
         try:
             v2fo2dict_one_row = self.cur.fetchone()
+            v2fo2dict_success = True
         except Exception as err:
             v2fo2dict_success = False
 
@@ -1535,39 +1565,19 @@ class Database_Service:
     
     def insert_from_dict(self, **kwargs):
         # print('insert_from_dict:', kwargs)
-        # ========================== DEBUG BLOCK
-        if DEBUG_SQL_ARGS:
-            ins_dict_validate_kwarg_keys, ins_dict_message = validate_kwargs(['table', 'key_columns',
-                                                                        'data_columns', 'data_dict'],
-                                                                    ['return_column', 'validate_keys',
-                                                                        'on_conflict', 'dump'], **kwargs)
-            if not ins_dict_validate_kwarg_keys:
-                print("Fatal Error", f"DEV ERROR (insert_from_dict): invalid keyword:{ins_dict_message}")
-        # ========================== DEBUG BLOCK
+        
+        ins_dict_table = self.ps.kwargs_manditory_lookup('table', **kwargs)
+        ins_dict_key_columns = self.ps.kwargs_manditory_lookup('key_columns', **kwargs)
+        ins_dict_data_columns = self.ps.kwargs_manditory_lookup('data_columns', **kwargs)
+        ins_dict_data_dict = self.ps.kwargs_manditory_lookup('data_dict', **kwargs)
+
+        ins_dict_dump = self.ps.kwargs_lookup('dump', False, **kwargs)
+        ins_dict_return_column = self.ps.kwargs_lookup('return_column', None, **kwargs)
+        ins_dict_validate_key_existance = self.ps.kwargs_lookup('validate_keys', True, **kwargs)
+        ins_dict_on_conflict = self.ps.kwargs_lookup('on_conflict', None, **kwargs)
+
         ins_dict_rtn_value = None
         ins_dict_success = True
-        ins_dict_return_column = None
-        ins_dict_on_conflict = None
-        ins_dict_dump = False
-        ins_dict_validate_key_existance = True
-
-        for ins_dict_key, ins_dict_value in kwargs.items():
-            if ins_dict_key == 'table':
-                ins_dict_table = ins_dict_value
-            elif ins_dict_key == 'key_columns':
-                ins_dict_key_columns = ins_dict_value
-            elif ins_dict_key == 'data_columns':
-                ins_dict_data_columns = ins_dict_value
-            elif ins_dict_key == 'data_dict':
-                ins_dict_data_dict = ins_dict_value
-            elif ins_dict_key == 'return_column':
-                ins_dict_return_column = ins_dict_value
-            elif ins_dict_key == 'validate_keys':
-                ins_dict_validate_key_existance = ins_dict_value
-            elif ins_dict_key == 'on_conflict':
-                ins_dict_on_conflict = ins_dict_value
-            elif ins_dict_key == 'dump':
-                ins_dict_dump = ins_dict_value
 
         ins_dict_result_df = pd.DataFrame([[0]], columns=["a"])
         # print('A:ins_dict_result_df.shape[0]', ins_dict_result_df.shape[0])
@@ -1680,31 +1690,19 @@ class Database_Service:
         return ins_dict_success, ins_dict_rtn_value
 
     def insert_from_df(self, **kwargs):
-        # ========================== DEBUG BLOCK
-        if DEBUG_SQL_ARGS:
-            ins_df_success, ins_df_message = validate_kwargs(['table', 'key_columns', 'data_columns',
-                                                            'df_data'],
-                                                            ['validate_keys', 'on_conflict'], **kwargs)
-            if not ins_df_success:
-                print("Fatal Error", f"DEV ERROR (insert_from_df): invalid keyword:{ins_df_message}")
-        # ========================== DEBUG BLOCK
-        ins_df_validate_keys = True
+        ins_df_table = self.ps.kwargs_manditory_lookup('table', **kwargs)
+        ins_df_key_columns = self.ps.kwargs_manditory_lookup('key_columns', **kwargs)
+        ins_df_data_columns = self.ps.kwargs_manditory_lookup('data_columns', **kwargs)
+        ins_df_df_data = self.ps.kwargs_manditory_lookup('df_data', **kwargs)
+
+        # ins_dict_dump = self.ps.kwargs_lookup('dump', False, **kwargs)
+        # ins_dict_return_column = self.ps.kwargs_lookup('return_column', None, **kwargs)
+
+        ins_df_validate_keys = self.ps.kwargs_lookup('validate_keys', True, **kwargs)
+        ins_df_on_conflict = self.ps.kwargs_lookup('on_conflict', None, **kwargs)
+
         ins_df_success = True
         ins_df_return_column = None
-        ins_df_on_conflict = None
-        for ins_df_key, ins_df_value in kwargs.items():
-            if ins_df_key == 'table':
-                ins_df_table = ins_df_value
-            elif ins_df_key == 'key_columns':
-                ins_df_key_columns = ins_df_value
-            elif ins_df_key == 'data_columns':
-                ins_df_data_columns = ins_df_value
-            elif ins_df_key == 'df_data':
-                ins_df_df_data = ins_df_value
-            elif ins_df_key == 'validate_keys':
-                ins_df_validate_keys = ins_df_value
-            elif ins_df_key == 'on_conflict':
-                ins_df_on_conflict = ins_df_value
         
         success = True
         running_key_list = []
@@ -2001,9 +1999,9 @@ class Database_Service:
             query = arg
         if len(query) == 0:
             query = self.ps.kwargs_manditory_lookup('query', **kwargs)
-        data = self.ps.kwargs_lookup('data', **kwargs)
-        query_dict = self.ps.kwargs_lookup('query_dict', **kwargs)
-        columns_list = self.ps.kwargs_lookup('columns', **kwargs)
+        data = self.ps.kwargs_lookup('data', {}, **kwargs)
+        query_dict = self.ps.kwargs_lookup('query_dict', {}, **kwargs)
+        columns_list = self.ps.kwargs_lookup('columns', [], **kwargs)
 
         # reset the working variables for the sql
         self.pop_index = 0
