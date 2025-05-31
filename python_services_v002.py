@@ -21,6 +21,7 @@ from datetime import datetime
 import platform
 from uuid import uuid4, UUID
 import re
+import ast
 
 """
 TO DO:
@@ -34,7 +35,6 @@ ENV_PROD = 'prod'
 ENV_LIST = [ENV_DEV, ENV_QA, ENV_STAGE, ENV_PROD]
 FULL_MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
 SHORT_MONTH_NAMES = ['Jan', 'Feb', 'Mar','Apr', 'May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
-DEBUG_SQL_ARGS = True
 INJECT_D_FE = '%('
 INJECT_D_BE = ')s'
 # EASE OF READING MARKERS
@@ -42,6 +42,7 @@ SINGLE_QUOTE = "'"
 DOUBLE_QUOTE = '"'
 LEADING_REPLACEMENT = "</"
 TRAILING_REPLACEMENT = "/>"
+DEBUG_SERVICES = False
 
 def validate_kwargs(required_keywords, optional_keywords, **kwargs):
     # print(required_keywords, optional_keywords, kwargs)
@@ -108,7 +109,7 @@ class Parsing_Service:
         self.intel_found_token_list = []
         self.intel_found_token_dict = {} 
 
-    def json_from_var(self, json_var: any, return_object: bool=True) -> tuple[bool, JSON]:
+    def json_from_var(self, json_var: any, local_debug: bool=False) -> tuple[bool, JSON]:
         """
         converts a variable to json
 
@@ -124,28 +125,58 @@ class Parsing_Service:
         <class 'list'> Real List: [1, 2, 3, 'four', 'five']
         <class 'str'>  Json List: [1, 2, 3, "four", "five"]
         """
-
+        if local_debug: print("======== LOCAL DEBUG =========")
         success = False
         return_json = {}
         
-        # print("json_translate_from_var:", type(json_var), json_var)
-
         if isinstance(json_var, list) or isinstance(json_var, dict):
+            if local_debug: print(f"[210.0] is LIST or DICT {type(json_var)} {json_var}")
+            # Turn the incoming variable into a string
             json_var = json.dumps(json_var)
-
+            if local_debug: print(f"[210.1] made to a string {type(json_var)} {json_var}")
+            success = True
         if isinstance(json_var, str):
+            if local_debug: print(f"[210.2] is string {type(json_var)} {json_var}")
             # sometimes AI just returns json embedding
             if len(json_var) > 10:
                 if json_var[0:7] == "```json":
                     json_var = json_var[7:-3]   
             if len(json_var) > 12: 
                 if json_var[0:9] == "```python":
-                    json_var = json_var[9:-3]  
+                    json_var = json_var[9:-3]
+
+            #problematic character replacement
+            json_var = json_var.replace("’","'")
+
+            json_var = json_var.replace("\\'","'")
+            json_var = json_var.replace('\\"','"')
+            json_var = json_var.strip()
+
+            if local_debug: print(f"[210.2pre] is string {type(json_var)} >>{json_var}<<")  
             try:
-                return_json = json.loads(json_var)
+                return_json = json.loads(json_var, strict=False)
+                # return_json = json.loads(json_var)
                 success = True
             except:
-                pass
+                print(f"[210.3] json.loads failed {json_var}")
+                # so the statement is probably malformed
+                left_bracket = json_var.count('[')
+                right_bracket = json_var.count(']')
+                left_curly = json_var.count('{')
+                right_curly = json_var.count('}')
+                doubles = json_var.count('"')
+                singles = json_var.count("'")
+                if left_bracket != right_bracket or left_curly != right_curly or (singles % 2) != 0 or (doubles % 2) != 0:
+                    print(f"FATAL malformed json: curly_bracket:{left_curly}!={right_curly} or brackets[]:{left_bracket}!={right_bracket} " + \
+                          f"single_quotes:{singles} double_quotes:{doubles} ")
+                data = ast.literal_eval(json_var)
+                print(f'FAIL: {json_var}')
+                exit(0)
+        else:
+            print(f"FATAL unknown json isinstance: Type: {type(json_var)} {json_var}")
+            exit(0)
+
+        if local_debug: print(f"[210.99] type:{type(return_json)} success:{success} return:{return_json}")
         return success, return_json
 
     def list_append_unique(self, list1: list, list2: list) -> list:
@@ -244,6 +275,8 @@ class Parsing_Service:
         return success, source, match
 
     def cleanse_string_nan(self, input_value: any, remove_list=[], capitalize_case=False) -> str:
+        # if DEBUG_SERVICES: print(f"[201] type:{type(input_value)} value:{input_value}")
+        if input_value == None: input_value = ""
         value = str(input_value)
         if value.upper() == 'NAN':
             value = ""
@@ -1830,6 +1863,17 @@ class Database_Service:
         return output_list
     
     def sql_to_token_dict(self, query) -> dict:
+        local_debug = False
+
+        if local_debug: print("================")
+        if local_debug: print(query)
+        
+        token_index = 0
+        token_dict = {}
+        term_list = []
+        index = 0
+
+
         parent_token_dict = self.ps.text_to_token_dict(query, word_inclusion='_@.()')
         """
         3: {'term': 'results', 'type': 'term'}, 
@@ -1840,14 +1884,13 @@ class Database_Service:
         8: {'term': 'as', 'type': 'term'}, 
         9: {'term': announcement_date, 'type': 'term'}
         """
-        token_index = 0
-        token_dict = {}
-        term_list = []
-        index = 0
+
         parent_term_list = parent_token_dict['term_list']
 
         while index < len(parent_term_list):
+            
             pvalue = parent_token_dict[index]
+            if local_debug: print(f"[500a] sql_to_token_dict {index} {token_index} {pvalue} {token_dict}")
             # print("pvalue:",pvalue)
             if pvalue['type'] == 'term':
                 holding_term = pvalue['term']
@@ -1855,34 +1898,47 @@ class Database_Service:
                 step_index += 1
                 ck_success, ck_value = self.check_token_dict_neighbors(parent_token_dict, step_index, term='-', type='delimiter')
                 if ck_success:
+                    if local_debug: print(f"[500b] step_index:{step_index} len:{len(parent_term_list)}")
                     holding_term += ck_value['term']
                     step_index += 1
                     ck_success, ck_value = self.check_token_dict_neighbors(parent_token_dict, step_index, term='>', type='delimiter')
                     if ck_success:
+                        if local_debug: print(f"[500c] step_index:{step_index} len:{len(parent_term_list)}")
                         holding_term += ck_value['term']
                         step_index += 1
                         ck_success, ck_value = self.check_token_dict_neighbors(parent_token_dict, step_index, type='literal')
                         if ck_success:
+                            if local_debug: print(f"[500d] step_index:{step_index} len:{len(parent_term_list)}")
                             holding_term += ck_value['term']
                             token_dict[token_index] = {'term': holding_term, 'type': 'json_column'}
                             index = step_index
                         else:
                             ck_success, ck_value = self.check_token_dict_neighbors(parent_token_dict, step_index, term='>', type='delimiter')
                             if ck_success:
+                                if local_debug: print(f"[500e] step_index:{step_index} len:{len(parent_term_list)}")
                                 holding_term += ck_value['term']
                                 step_index += 1
                                 ck_success, ck_value = self.check_token_dict_neighbors(parent_token_dict, step_index, type='literal')
                                 if ck_success:
+                                    if local_debug: print(f"[500f] step_index:{step_index} len:{len(parent_term_list)}")
                                     holding_term += ck_value['term']
                                     token_dict[token_index] = {'term': holding_term, 'type': 'json_column'}
                                     index = step_index
                                 else:
+                                    if local_debug: print(f"[500g] token_index:{token_index} pvalue:{pvalue}")
                                     token_dict[token_index] = pvalue
                             else:
+                                if local_debug: print(f"[500h] token_index:{token_index} pvalue:{pvalue}")
                                 token_dict[token_index] = pvalue
+                    else:
+                        # this else statement was missing - it might have been an oversight
+                        if local_debug: print(f"[500-new] was this assignment intentionally left out???? token_index:{token_index} pvalue:{pvalue}")
+                        token_dict[token_index] = pvalue
                 else:
+                    if local_debug: print(f"[500i] token_index:{token_index} pvalue:{pvalue}")
                     token_dict[token_index] = pvalue
             else:
+                if local_debug: print(f"[500j] token_index:{token_index} pvalue:{pvalue}")
                 token_dict[token_index] = pvalue
             
             pvalue = token_dict[token_index]

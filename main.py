@@ -70,6 +70,7 @@ import string
 import requests
 import re
 import json
+import ast
 
 import math
 import shutil
@@ -95,7 +96,8 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # =================================================
 ROOT = 'pcederstrom'
 AI_ONEDRIVE = 'OneDrive - Polaris I O/Engineering - Documents/Operations/Client Research Reports'
-AI_BATCH_LIMIT = 10
+AI_BATCH_LIMIT = 15
+DEBUG_APP = True
 CATEGORY_LIST = ['Business Drivers', 'Business Strategies', 'Market Forces']
 MARKET_FORCES_LIST = ['Economy', 'Government', 'Competitors', 'Customers', 'Suppliers', 'Shareholders']
 BUSINESS_DRIVERS_LIST = ['Reduce Costs', 'Manage Risks', 'Improve Business Continuity', 'Deliver End-to-End services', 'Justify IT Investments', 
@@ -164,7 +166,7 @@ def load_walmart_locations(sql: Type[Database_Service], wrkflw: Type[Workflow_PL
                                                     data_dict=data_dict)
             elif df.shape[0] == 1:
                 # update
-                my_dict = sql.df_to_dict(df)
+                success, my_dict = sql.df_to_dict(df)
                 payload = my_dict[payload]
                 payload = ps.dict_merge(payload, location_payload)
                 payload = json.dumps(payload)
@@ -758,19 +760,22 @@ def insert_client_subscription(sql: Type[Database_Service], wrkflw: Type[Workflo
     return key
 
 def execute_report_writer(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service]):
+    ps: Type[Parsing_Service] = sql.ps
+    local_debug = True
     query = f"Select t1.id as client_id, t2.model_id as model_id, " + \
             f"t2.state as state, t1.name as client_name, t2.report_label as report_label, " + \
             f"t3.name as model_name, t2.report_payload as report_payload from </$ua_clients$/> t1 " + \
-            f"inner join </$client_subscriptions$/> t2 on t1.id = t2.client_id " + \
+            f"RIGHT join </$client_subscriptions$/> t2 on t1.id = t2.client_id " + \
             f"inner join </$ai_models$/> t3 on t3.id = t2.model_id " + \
             f"where t2.created_on in (Select max(created_on) from </$client_subscriptions$/> group by client_id, model_id, report_label)"
     query = wrkflw.solve_text_replacements(query)
-    # print(query)
+    if local_debug: print('execute_report_writer', query)
     success, report_df = sql.sql(query)
             
     for report_index, report_row in report_df.iterrows():
         if report_row['state'] == 'ACTIVE':
-            report_payload = report_row['report_payload']
+            success, report_payload = ps.json_from_var(report_row['report_payload'])
+            print(report_payload)
             if 'report_break_key' in report_payload.keys():
                 page_break_key = report_payload['report_break_key']
             else:
@@ -825,32 +830,44 @@ def execute_report_writer(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_
             print(f"New Report: {out_file}")
 
 def get_version_major_minor(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service], model_id: str) -> list:
-    version_dict = {'active_major': 0,'active_minor': 0, 'last_major': 0, 'last_minor':0}
+    # version_dict = {'active_major': 0,'active_minor': 0, 'last_major': 0, 'last_minor':0}
+    ps: Type[Parsing_Service] = sql.ps
+    version_dict = {}
     tablename = wrkflw.solve_text_replacements('</$ai_model_versions$/>')
     query = f"SELECT max(major) as max from {tablename} where ai_model_id = '{model_id}' and state = 'ACTIVE'"
+    if DEBUG_APP: print(query)
     success, df = sql.sql(query)
-    success, temp_dict = sql.df_to_dict(df)
-    if success:
-        major = int(temp_dict['max'])
-        query = f"SELECT max(minor) as max from  {tablename} where ai_model_id = '{model_id}' and major = {major} and state = 'ACTIVE'"
-        success, df = sql.sql(query)
+    if df.shape[0] == 1:
         success, temp_dict = sql.df_to_dict(df)
         if success:
-            minor = int(temp_dict['max'])
-            version_dict['active_major'] = major
-            version_dict['active_minor'] = minor
-    query = f"SELECT max(major) as max from {tablename} where ai_model_id = '{model_id}'"
-    success, df = sql.sql(query)
-    success, temp_dict = sql.df_to_dict(df)
-    if success:
-        major = int(temp_dict['max'])
-        query = f"SELECT max(minor) as max from  {tablename} where ai_model_id = '{model_id}' and major = {major}"
+            # if DEBUG_APP: print(f"[101] {temp_dict}")
+            major = ps.cleanse_string_nan(temp_dict['max'])
+            if len(major) > 0:
+                major = int(major)
+                query = f"SELECT max(minor) as max from  {tablename} where ai_model_id = '{model_id}' and major = {major} and state = 'ACTIVE'"
+                success, df = sql.sql(query)
+                if df.shape[0] == 1:
+                    success, temp_dict = sql.df_to_dict(df)
+                    if success:
+                        minor = int(temp_dict['max'])
+                        version_dict['active_major'] = major
+                        version_dict['active_minor'] = minor
+        query = f"SELECT max(major) as max from {tablename} where ai_model_id = '{model_id}'"
         success, df = sql.sql(query)
-        success, temp_dict = sql.df_to_dict(df)
-        if success:
-            minor = int(temp_dict['max'])
-            version_dict['last_major'] = major
-            version_dict['last_minor'] = minor
+        if df.shape[0] == 1:
+            success, temp_dict = sql.df_to_dict(df)
+            if success:
+                major = ps.cleanse_string_nan(temp_dict['max'])
+                if len(major) > 0:
+                    major = int(major)
+                    query = f"SELECT max(minor) as max from  {tablename} where ai_model_id = '{model_id}' and major = {major}"
+                    success, df = sql.sql(query)
+                    if df.shape[0] == 1:
+                        success, temp_dict = sql.df_to_dict(df)
+                        if success:
+                            minor = int(temp_dict['max'])
+                            version_dict['last_major'] = major
+                            version_dict['last_minor'] = minor
     return version_dict
 
 def execute_research_for_entity_metadata(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service]):
@@ -868,10 +885,11 @@ def execute_model_research_via_subscriptions(sql: Type[Database_Service], wrkflw
     query = f"Select t1.id as client_id, t2.model_id as model_id, " + \
             f"t2.state as state, t1.name as client_name, t2.report_label as report_label, " + \
             f"t3.name as model_name, t2.report_payload as report_payload from </$ua_clients$/> t1 " + \
-            f"inner join </$client_subscriptions$/> t2 on t1.id = t2.client_id " + \
+            f"RIGHT join </$client_subscriptions$/> t2 on t1.id = t2.client_id " + \
             f"inner join </$ai_models$/> t3 on t3.id = t2.model_id " + \
             f"where t2.created_on in (Select max(created_on) from </$client_subscriptions$/> group by client_id, model_id, report_label)"
     query = wrkflw.solve_text_replacements(query)
+    if DEBUG_APP: print(query)
     success, report_df = sql.sql(query)
     model_list = []
     for report_index, report_row in report_df.iterrows():
@@ -882,7 +900,6 @@ def execute_model_research_via_subscriptions(sql: Type[Database_Service], wrkflw
 def model_research(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service], model_list:list):
     ps: Type[Parsing_Service] = sql.aws.ps
     ts: Type[Timer_Service] = sql.aws.ts
-    mr_debug = True
 
     # run each model
     input_row_count = 0
@@ -899,11 +916,15 @@ def model_research(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service
         if 'active_major' in version_dict.keys() and 'active_minor' in version_dict.keys():
             query = f"SELECT id, payload from {tablename} where ai_model_id = '{model_dict['model_id']}' and " + \
                     f"major = {version_dict['active_major']} and minor = {version_dict['active_minor']}"
+            # if DEBUG_APP: print(f"[103] query:{query}")
             success, df = sql.sql(query)
             success, temp_dict = sql.df_to_dict(df)
+            # if DEBUG_APP: print(f"[104] type:{type(temp_dict)} payload:{temp_dict}")
+            
             version_id = temp_dict['id']
             wrkflw.add_replacement_pair('</version_id/>', version_id)
-            payload = temp_dict['payload']
+            success, payload = ps.json_from_var(temp_dict['payload'], True)
+            # if DEBUG_APP: print(f"[105] type:{type(payload)} payload:{payload}")
             workflow = payload['workflow']
             prompt_template = ""
 
@@ -914,6 +935,7 @@ def model_research(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service
             system_missing_dict = {}
             output_table_alias = '</$research_results$/>'
             output_payload_keys = []
+            prompt_response_type = 'json'
 
             # Do the setup on for the model Version
             for item in workflow:
@@ -921,7 +943,7 @@ def model_research(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service
                 if 'AI_DRIVER' in item.keys():
                     query = ps.dict_lookup('AI_DRIVER', item)
                     query = wrkflw.solve_text_replacements(query)
-                    if mr_debug: print(query)
+                    if DEBUG_APP: print(query)
                     success, driver_df = sql.sql(query)
                 elif 'REFERENCE_COLUMNS' in item.keys():
                     driver_replacement_list = ps.dict_lookup('REFERENCE_COLUMNS', item)
@@ -933,6 +955,8 @@ def model_research(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service
                 elif 'OPENAI' in item.keys():
                     prompt_template = ps.dict_lookup('OPENAI', item)
                     ai_engine = "OpenAI"
+                elif 'AI_RESPONSE_TYPE' in item.keys():
+                    prompt_response_type = ps.dict_lookup('AI_RESPONSE_TYPE', item)
                 elif 'INSERT_TABLE' in item.keys():
                     output_table_alias = ps.dict_lookup('INSERT_TABLE', item)
                 elif 'INSERT_PAYLOAD' in item.keys():
@@ -944,21 +968,30 @@ def model_research(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service
                 ai_client = OpenAI_Service(sql.aws)
             elif ai_engine == 'Perplexity':
                 ai_client = Perplexity_Service(sql.aws)
+            
+            # response type
+            prompt_response_type = prompt_response_type.lower()
+            if prompt_response_type not in ['json','dict']:
+                print(f"FATAL AI_RESPONSE_TYPE: must be json or dict: not {prompt_response_type}")
 
             # RUN THROUGH THE DRIVER FILE NOW
             for r_index, r_row in driver_df.iterrows():
                 input_row_count += 1
-                if mr_debug: print("DEBUG: r_row:", "\n", r_row, "\n")
+                if DEBUG_APP: print("DEBUG: r_row:", "\n", r_row, "\n")
 
                 # check the date or if no date then to it
-                research_date = r_row['research_date']
-                success = True
-                try:
-                    check_date_object = datetime.strptime(research_date, "%Y-%m-%d") + timedelta(days=int(r_row['min_resting_days']))
-                    if check_date_object > ts.app_start_time:
-                        success = False
-                except:
-                    pass
+                if 'research_date' in r_row.keys():
+                    research_date = r_row['research_date']
+                    success = True
+                    try:
+                        check_date_object = datetime.strptime(research_date, "%Y-%m-%d") + timedelta(days=int(r_row['min_resting_days']))
+                        if check_date_object > ts.app_start_time:
+                            success = False
+                    except:
+                        pass
+                else:
+                    success = True
+
                 if success:
                     if ai_question_count % 5 == 0:
                         print(f"research_execution Loop timer {sql.aws.ts.stopwatch()}: {ai_question_count} ai questions asked " + \
@@ -975,11 +1008,21 @@ def model_research(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service
 
                     # ASK AI THE QUESTION
                     prompt = wrkflw.solve_text_replacements(prompt_template)
-                    if mr_debug: print(prompt)
+                    if DEBUG_APP: print(prompt)
                     ai_question_count += 1
                     response = ai_client.submit_inquiry(prompt)
-                    if mr_debug: print(response)
-                    success, json_response = ps.json_from_var(response)
+                    if DEBUG_APP: print(response)
+                    if prompt_response_type == 'json':
+                        success, json_response = ps.json_from_var(response)
+                    elif prompt_response_type == 'dict':
+                        json_response = ast.literal_eval(response)
+                        if isinstance(json_response, dict):
+                            success = True
+                        else:
+                            success = False
+                    else:
+                        print("FATAL model research: invalie AI_PROMPT_RESPONSE processing type {prompt_response_type}")
+                        exit(0)
 
                     if success:
                         result_write_count += recursive_result_insert(sql, wrkflw, output_table_alias, output_payload_keys, "AI RESPONSE", json_response, )
@@ -989,7 +1032,7 @@ def model_research(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service
                             payload = {'note': response}
                             write_research_results(sql, wrkflw, False, payload)
                         else:    
-                            if mr_debug: print(f"DEBUG: @@@@model_research SKIPPING Verbose AI: {response}")
+                            if DEBUG_APP: print(f"DEBUG: @@@@model_research SKIPPING Verbose AI: {response}")
 
                 if ai_question_count > AI_BATCH_LIMIT and result_write_count > 2:
                     break
@@ -1016,12 +1059,14 @@ def write_research_results(sql: Type[Database_Service], wrkflw: Type[Workflow_PL
             success, key = sql.insert_from_dict(table=output_table_name, key_columns=['id'],
                                                 data_columns=list(data_dict.keys()), data_dict=data_dict)
         elif df.shape[0] == 1:
-            my_dict = sql.df_to_dict(df)
-            update_payload = my_dict['payload']
+            success, data_dict = sql.df_to_dict(df)
+            update_payload = data_dict['results']
             update_payload = ps.dict_merge(update_payload, payload)
             data_dict['results'] = json.dumps(update_payload)
-            success, key = sql.update(table=output_table_name, where_key=['id'],
-                                      data_dict=data_dict)
+            # when results get updated update the created date
+            data_dict['created_on'] = "timezone('UTC'::text, now()"
+
+            success, key = sql.update(table=output_table_name, where_key='id', data=data_dict)
         else:
             print(f'WARNING: write_research_results - NO UPDATE: multiple results found model:{model_id} entity:{entity_metadata_id}')
 
@@ -1042,9 +1087,8 @@ def update_metadata_results(sql: Type[Database_Service], wrkflw: Type[Workflow_P
         payload[key] = value
     payload = json.dumps(payload)
 
-    data_dict = {'id': entity_metadata_id, 'results': payload, 'updated_on': 'now()'}
-    success, key = sql.update(table=output_table_name, where_key=['id'],
-                                        data_dict=data_dict)
+    data_dict = {'id': entity_metadata_id, 'results': payload, 'updated_on': "timezone('UTC'::text, now()"}
+    success, key = sql.update(table=output_table_name, where_key='id', data=data_dict)
 
 def recursive_result_insert(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service], 
                             output_table_alias: str, output_payload_keys: list, parent_key: str, 
@@ -1052,6 +1096,9 @@ def recursive_result_insert(sql: Type[Database_Service], wrkflw: Type[Workflow_P
     """
     return: rows_written
     """
+
+    local_debug = True
+
     ps: Type[Parsing_Service]= sql.aws.ps
     ts: Type[Timer_Service]= sql.aws.ts
     rows_written = 0
@@ -1059,12 +1106,15 @@ def recursive_result_insert(sql: Type[Database_Service], wrkflw: Type[Workflow_P
     try:
         key_list = list(json_response.keys())
     except:
+        if local_debug: print(f">>>[700a] recursive: unable to make keylist")
         return False
     
     if len(key_list) == 0:
+        if local_debug: print(f">>>[700b] recursive: unable to make keylist")
         return False
     
-    success, found, missing = ps.verify_lists(output_payload_keys, key_list, compare='ALL')
+    # THIS WAS ALL ... changed to ANY
+    success, found, missing = ps.verify_lists(output_payload_keys, key_list, compare='ANY')
     if success:
         # build the payload
         payload = {}
@@ -1235,12 +1285,12 @@ def merge_metadata_entities(sql: Type[Database_Service], wrkflow: Type[Workflow_
         tablename = wrkflow.solve_text_replacements('</$entity_metadata$/>')
         query = f"Select id, payload from {tablename} where id = '{df_row['remove']}"
         success, result = sql.sql(query)
-        df_dict = sql.df_to_dict(result)
+        success, df_dict = sql.df_to_dict(result)
         remove_payload = df_dict['payload']
         # get keep payload
         query = f"Select id, payload from {tablename} where id = '{df_row['keep']}"
         success, result = sql.sql(query)
-        df_dict = sql.df_to_dict(result)
+        succeess, df_dict = sql.df_to_dict(result)
         keep_payload = df_dict['payload']
         #combine payloads
         keep_payload = ps.dict_merge(keep_payload, remove_payload)
@@ -1264,24 +1314,30 @@ def merge_metadata_entities(sql: Type[Database_Service], wrkflow: Type[Workflow_
         success, result = sql.sql(query)
 
 def df_to_table_using_CRUD(sql: Type[Database_Service], df: pd.DataFrame, tablename: str, primary_key: str, 
-                           parent_column: str="", alias_dict: dict={},  exclude_list: list=[]) -> UUID:
+                           parent_column: str="", alias_dict: dict={},  exclude_list: list=[], debug: bool=False) -> UUID:
     ps: Type[Parsing_Service] = sql.ps
     # process the rows
     df_columns = df.columns.to_list()
 
     for mv_index, mv_row in df.iterrows():
+        # if DEBUG_APP: print(f"[107a]: {mv_row}")
         # copy all the data to the output data dict
         data_dict = {}
         for key in mv_row.keys():
             if key not in ['CRUD', TEMP_MODEL_ID_LINK] and key not in exclude_list:
                 data_dict[key] = mv_row[key]
+                # if DEBUG_APP: print(f"[107c] {data_dict[key]}")
                 # handle JSON fields differently
                 if key in ['payload', 'report_payload']:
+                    # if DEBUG_APP: print(f"[107e] type:{type(data_dict[key])}")
                     try:
-                        data_dict[key] =json.dumps(mv_row[key])
+                        data_dict[key] = json.dumps(mv_row[key])
+                        if DEBUG_APP: print(f"[107f] type:{type(data_dict[key])}")
                     except:
                         print(f"FATAL df_to_table_using_CRUD - json.loads error {mv_row[key]}")
                         exit(0)
+        
+        if DEBUG_APP: print(f'[107b] {data_dict}')
 
         # if the primary key is empty, then generate one        
         if len(ps.cleanse_string_nan(data_dict[primary_key])) == 0:
@@ -1306,6 +1362,7 @@ def df_to_table_using_CRUD(sql: Type[Database_Service], df: pd.DataFrame, tablen
                     data_dict[key] = value
 
         if str(mv_row['CRUD']).upper() == 'UPDATE':
+            if DEBUG_APP: print(f"[107] UPDATE: {data_dict}")
             success, result = sql.update(table=tablename, where_key=primary_key, 
                                         data=data_dict)
         elif str(mv_row['CRUD']).upper() in ['CREATE', 'INSERT']:
@@ -1314,6 +1371,7 @@ def df_to_table_using_CRUD(sql: Type[Database_Service], df: pd.DataFrame, tablen
         elif str(mv_row['CRUD']).upper() in ['DELETE','DROP','REMOVE']:
             query = f"DELETE FROM {tablename} where id='{mv_row[primary_key]}'"
             success, result = sql.sql(query)
+
     return alias_dict
 
 def update_config_tabs(df: pd.DataFrame, skip_columns:list, sheet: str, xlsx_target_file: str):
@@ -1346,8 +1404,19 @@ def main():
     credentials_dict = fs.dict_from_xlsx("app_config", 'credentials')
     aws = AWS_Credentials_Service(credentials_dict['environment'], credentials_dict['user'], credentials_dict['password'])
 
+    """
+    string_dict = '{"pharmacy": True, "pharmacy_established": "2005-06-15", "eye_center": True, "eye_center_established": "2010-03-20"}'
+    ps = Parsing_Service()
+    x = ast.literal_eval(string_dict)
+    print(type(x), x)
+    success, var = ps.json_from_var(string_dict)
+    print(success, type(var), var)
+    exit(0)
+    """
+    
     sql = Database_Service(aws, 'db_airflow')
     wrkflw = Workflow_PL_Service(sql)
+
     wrkflw.add_global_replacement_pair('</$ua_clients$/>',f'signal.{sql.aws.target_env}_ua_clients')
     wrkflw.add_global_replacement_pair('</$client_subscriptions$/>',f'signal.{sql.aws.target_env}_client_subscriptions')
     wrkflw.add_global_replacement_pair('</$ai_models$/>',f'signal.{sql.aws.target_env}_ai_models')
@@ -1431,7 +1500,7 @@ def main():
                 # =====
                 df = fs.df_from_xlsx("app_config", 'ai_versions')
                 tablename = wrkflw.solve_text_replacements('</$ai_model_versions$/>')
-                temp_alias_dict = df_to_table_using_CRUD(sql, df, tablename, 'id', 'ai_model_id', temp_alias_dict)
+                temp_alias_dict = df_to_table_using_CRUD(sql, df, tablename, 'id', 'ai_model_id', temp_alias_dict, [], debug=True)
                 # =====
                 df = fs.df_from_xlsx("app_config", 'client_subscriptions')
                 tablename = wrkflw.solve_text_replacements('</$client_subscriptions$/>')
