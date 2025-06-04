@@ -147,7 +147,6 @@ class Parsing_Service:
 
             #problematic character replacement
             json_var = json_var.replace("’","'")
-
             json_var = json_var.replace("\\'","'")
             json_var = json_var.replace('\\"','"')
             json_var = json_var.strip()
@@ -169,8 +168,8 @@ class Parsing_Service:
                 if left_bracket != right_bracket or left_curly != right_curly or (singles % 2) != 0 or (doubles % 2) != 0:
                     print(f"FATAL malformed json: curly_bracket:{left_curly}!={right_curly} or brackets[]:{left_bracket}!={right_bracket} " + \
                           f"single_quotes:{singles} double_quotes:{doubles} ")
-                data = ast.literal_eval(json_var)
-                print(f'FAIL: {json_var}')
+                print(ast.literal_eval(json_var))
+                print(f'try: https://jsonlint.com/')
                 exit(0)
         else:
             print(f"FATAL unknown json isinstance: Type: {type(json_var)} {json_var}")
@@ -178,6 +177,11 @@ class Parsing_Service:
 
         if local_debug: print(f"[210.99] type:{type(return_json)} success:{success} return:{return_json}")
         return success, return_json
+    
+    def dict_retrieve_value(self, src_dict: dict, find_key: str, system_missing_value: any) -> any:
+        if find_key not in src_dict.keys():
+            return system_missing_value
+        return src_dict[find_key]
 
     def list_append_unique(self, list1: list, list2: list) -> list:
         set1 = set(list1)
@@ -1366,10 +1370,17 @@ class Database_Service:
             if key != where_key and key not in exclude_list:
                 tag = f"col{index}"
                 query += f"{key} = %({tag})s, "
-                query_dict[tag] = value
+                if isinstance(value, UUID):
+                    query_dict[tag] = str(value)
+                else:
+                    query_dict[tag] = value
             index += 1
         query = query[:-2] + f" where {where_key} = %(col_key)s"
-        query_dict['col_key'] = data_dict[where_key]
+        if isinstance(data_dict[where_key], UUID):
+            query_dict['col_key'] = str(data_dict[where_key])
+        else:
+            query_dict['col_key'] = data_dict[where_key]
+
         return self.execute_query(query=query, query_dict=query_dict)
     
     def insert(self, **kwargs):
@@ -2202,7 +2213,7 @@ class OpenAI_Service():
 
     # use this when you want to just ask a one-off or initial question
     def submit_inquiry(self, ask: str) -> str:
-        self.conversation_setup()
+        self.conversation = self.conversation_setup()
         return self.submit_dialog(ask)
     
     # use this when you want to continue having a conversation without managing the conversation
@@ -2343,209 +2354,3 @@ class Perplexity_Service():
             exit(0)
         response = response_raw.choices[0].message.content
         return response
-    
-class Workflow_PL_Service:
-    """
-    PL: Procedural language service is used to solve 
-    "python like instruction blocks" and "replacement variables
-    """
-    # FUTURE WORK????
-    """
-    workflow = ['''
-                DECLARE DF_ENTITY_ACCOUNTS as DATAFRAME;
-                DF_ENTITY_ACCOUNTS = sql('SELECT A. as industry FROM </$entity_metadata$/> group by industry order by industry');
-                
-                DECLARE DF_INDUSTRY as DATAFRAME;
-                DECLARE INDUSTRY_LIST as LIST;
-                DECLARE ITEM as STRING;
-                DF_INDUSTRY = sql('SELECT payload->'industry' as industry FROM </$entity_metadata$/> group by industry order by industry');
-                DF_RESULTS = 
-                INDUSTRY_LIST = TO_LIST(DF_INDUSTRY.INDUSTRY);
-                FOR ITEM IN INDUSTRY_LIST;
-                    DF_ = sql('SELECT payload->'industry' as industry FROM </$entity_metadata$/> group by industry order by industry');
-                
-                print(DF);
-                ''']
-    x.execute(workflow)
-    del x
-    """
-
-    def __init__(self, sql: Type[Database_Service], parent_workflow_pl_service: any=None):
-
-        self.sql: Type[Database_Service] = sql
-        self.aws: Type[AWS_Credentials_Service] = self.sql.aws
-        self.ps: Type[Parsing_Service] = self.aws.ps
-        self.ts: Type[Timer_Service] = self.aws.ts
-
-        self.parent: Type[Workflow_PL_Service] = parent_workflow_pl_service
-        self.children: list = []
-        self.var_dict: dict = {}
-        self.return_dict: dict = {}
-        self.workflow = []
-        self.workflow_index = 0
-        self.replace_dict = {}
-        self.global_replace_dict = {}
- 
-        self.next_dataframe_index = 0
-        self.dataframes = []
-        self.reset()
-
-    def __del__(self):
-        # destructor called during >> del p.Replacement
-        self.reset()
-
-    def reset(self):
-        for obj in self.children:
-            del obj
-
-        self.var_dict = {}
-        self.replace_dict = {}
-        # system defined variables
-        self.replace_dict['$YYYY_MM_DD$'] = self.sql.aws.ts.run_stamp_YYYYMMDD
-        self.replace_dict['$db_env$'] = self.sql.aws.target_env
-        for k, v in self.global_replace_dict.items():
-            self.replace_dict[k] = v
-
-        if self.parent != None:
-            for p_key, p_item in self.parent.var_dict:
-                self.var_dict[p_key] = p_item
-
-        self.workflow_index = 0
-        self.return_dict = {}
-    
-    def add_replacement_pair(self, key: str, value: str):
-        ready_key = key
-        if LEADING_REPLACEMENT != ready_key[0:len(LEADING_REPLACEMENT)]:
-            ready_key = LEADING_REPLACEMENT + ready_key
-        if TRAILING_REPLACEMENT != ready_key[-len(TRAILING_REPLACEMENT):]:
-            ready_key = ready_key + TRAILING_REPLACEMENT
-        self.replace_dict[ready_key] = value
-    
-    def add_global_replacement_pair(self, key: str, value: str):
-        self.global_replace_dict[key] = value
-        self.add_replacement_pair(key, value)
-
-    def intelligent_token_dict_replacements(self, intel_token_dict: dict) -> dict:
-        wf_token_list = intel_token_dict['term_list']
-        out_list = []
-        token_position = 0
-        for token in wf_token_list:
-            token_dict = intel_token_dict[token_position]
-            if token_dict['type'] == "replacement":
-                if token in self.replace_dict.keys():
-                    out_list.append(self.replace_dict[token])
-                else:
-                    print('Fatal: intelligent_token_dict_replacements:', token)
-                    exit(0)
-            else:
-                out_list.append(token)
-            token_position += 1
-        intel_token_dict['term_list'] = out_list
-        return intel_token_dict
-
-    def solve_text_replacements(self, in_text: str, **kwargs) -> str:
-        out_text = in_text
-        for k1, v1 in self.replace_dict.items():
-            if k1 in out_text:
-                out_text = out_text.replace(k1, str(v1))
-        return out_text
-
-    def fatal_error_check(self, success: bool, **kwargs):
-        if not success:
-            print('======= FATAL ERROR')
-            if self.workflow_index < len(self.workflow):
-                print(f'workflow[workflow_index]: {self.workflow[self.workflow_index]}')
-            else:
-                print(f'workflow_index:{self.workflow_index}')
-            print(f'workflow: {self.workflow}')
-            for fatal_error_key, fatal_error_value in kwargs.items():
-                print(f'kwargs: {fatal_error_key}: {fatal_error_value}')
-            for fatal_error_key, fatal_error_value in self.replace_dict.items():
-                print(f'replace_dict: {fatal_error_key}: {fatal_error_value}')
-            for fatal_error_key, fatal_error_value in self.var_dict.items():
-                print(f'var_dict: {fatal_error_key}: {fatal_error_value}') 
-            exit(0)
-    
-    def verify_list_index_value(self, input_list: list, index: int, value: any=None, expected_elements: int=1) -> bool:
-        success = True
-        if index + expected_elements - 1 > len(input_list):
-            return False
-        if isinstance(value, list):
-            if input_list[index] in value:
-                return True
-            else:
-                return False
-        elif input_list[index] == value:
-            return True
-        return False
-    
-    # DECLARE ==================================================
-    def _execute_declare(self, src_command_word_list: list):
-        print('DECLARE',src_command_word_list)
-
-        command_word_list = [str(value).upper() for value in src_command_word_list]
-        index = 1
-        var_name = command_word_list[index]
-        var_type = 'ANY'
-        var_value = None
-        index += 1
-        if self.verify_list_index_value(command_word_list, index, 'AS', 2):
-            var_type = command_word_list[index+1]
-            index += 2
-        if self.verify_list_index_value(command_word_list, index, '=', 2):
-            var_value = command_word_list[index+1]
-
-        if isinstance(var_value, str):
-            try:
-                float_value = float(var_value)
-                var_type = 'FLOAT'
-                if int(var_value) == float_value:
-                    var_type = 'INT'
-                    var_value = int(var_value)
-                else:
-                    var_value = float_value
-            except:
-                try: 
-                    var_value = bool(var_value)
-                    var_type = 'BOOL'
-                except:
-                    pass
-        self.fatal_error_check(var_name not in self.var_dict.keys(),reason="duplicate variable declaration",input=src_command_word_list)
-        self.var_dict[var_name] = {'type':var_type, 'value': var_value}
-        
-    def _execute_command(self, src_command_word_list: list):
-        if len(src_command_word_list) > 0:
-            if str(src_command_word_list[0]).upper() == 'DECLARE':
-                self._execute_declare(src_command_word_list)
-            elif src_command_word_list[0] in self.var_dict.keys():
-                print('assignment',src_command_word_list)
-            else:
-                print('no command found',src_command_word_list)
-
-    def _execute_step(self):
-        print('execute_step')
-        wf_item = self.workflow[self.workflow_index]
-        wf_word_dict = self.aws.ps.text_to_token_dict(wf_item, hidden_delimiters=" \n", visible_delimiters=";()=-+/*")
-        wf_word_list = wf_word_dict['term_list']
-        print('wf_word_list',wf_word_list)
-
-        # in this step, do commands
-        step_index = 0
-        command_word_list = []
-        while step_index < len(wf_word_list):
-            current_step_word = wf_word_list[step_index]
-            if current_step_word == ";":
-                self._execute_command(command_word_list)
-                command_word_list = []
-            else:
-                command_word_list.append(current_step_word)
-            step_index += 1
-        self.workflow_index += 1
-
-    def execute(self, workflow: list) -> dict:
-        self.workflow_index = 0
-        self.workflow = workflow
-        while self.workflow_index < len(self.workflow):
-            self._execute_step()
-
-        self.fatal_error_check(False,reason="FORCED DUMP")

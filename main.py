@@ -14,18 +14,23 @@ CLIENT MODEL REPORT REGISTRATION:
 TODO LIST
 [X] - UUID to replace sequencers
 [X] - Add verbose entry record to the results file
-[ ] - Worksheet to make new/update existing Models (from ENG OPS FOLDER - Research Model Workbook - check insert or update based on ) ai_models and ai_model_versions
-[ ] - Add a MODEL TO Research to UPDATE entity_metadata (address, Industry, employees, data)
-SELECT id, entity_name, payload, updated_on FROM signal.dev_entity_metadata where state = 'ACTIVE'
-[ ] - Walmart Locations to entity_metadata
-[ ] - Walmart Eye Centers and Pharmacies (who is the client)
-[ ] - Client Entity Reports 
-[ ] - Research Consolidation on Product Names [FUTURE]
-[ ] - Entity Record Collapse
+[X] - Worksheet to make new/update existing Models (from ENG OPS FOLDER - Research Model Workbook - check insert or update based on ) ai_models and ai_model_versions
+[X] - Worksheet to make new/update existing Reports
+[X] - Walmart Locations to entity_metadata
+[X] - Walmart Eye Centers and Pharmacies (who is the client)
+[X] - Add a MODEL TO Research to UPDATE entity_metadata (address, Industry, employees, data)
+[ ] - FOR_LIST; FOR_DICT; LOOPs & LOAD_LIST <<$$state_list$$>> <<$$months_list$$>> 
 
-[ ] - Worksheet to make new/update existing Reports
+[ ] - Location entity model (first established date, Location closed date, longitude, latitude )
+[ ] - Location entity model by current month 
+
+[ ] - Client Entity Reports 
+[ ] - Entity Record Collapse
+[ ] - Entity Location Collapse
+
 [ ] - Operational Guide Book
 [ ] - Prioiritization Report - Add a list of Companies; Metadata, Intent Signals (multiple models) on one report
+[ ] - Research Consolidation on Product Names [FUTURE]
 
 main.py
 *****************************************************************************************
@@ -54,9 +59,10 @@ VERSION HISTORY:
 """
 from __future__ import print_function
 from python_services_v002 import Timer_Service, Perplexity_Service, File_Service, \
-        AWS_Credentials_Service, Database_Service, Parsing_Service, Workflow_PL_Service, \
+        AWS_Credentials_Service, Database_Service, Parsing_Service, \
         OpenAI_Service, LEADING_REPLACEMENT, TRAILING_REPLACEMENT, \
         console_input, ENV_DEV, ENV_QA, ENV_STAGE, ENV_PROD
+from workflow import Workflow_PL_Service
         
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
@@ -96,7 +102,7 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # =================================================
 ROOT = 'pcederstrom'
 AI_ONEDRIVE = 'OneDrive - Polaris I O/Engineering - Documents/Operations/Client Research Reports'
-AI_BATCH_LIMIT = 15
+AI_BATCH_LIMIT = 3
 DEBUG_APP = True
 CATEGORY_LIST = ['Business Drivers', 'Business Strategies', 'Market Forces']
 MARKET_FORCES_LIST = ['Economy', 'Government', 'Competitors', 'Customers', 'Suppliers', 'Shareholders']
@@ -871,7 +877,7 @@ def get_version_major_minor(sql: Type[Database_Service], wrkflw: Type[Workflow_P
     return version_dict
 
 def execute_research_for_entity_metadata(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service]):
-    query = f"SELECT id as model_id  FROM </$ai_models$/> where model_type = 'METADATA' and state = 'ACTIVE'"
+    query = f"SELECT id as model_id, state FROM </$ai_models$/> where model_type = 'METADATA'"
     query = wrkflw.solve_text_replacements(query)
     success, report_df = sql.sql(query)
     model_list = []
@@ -900,12 +906,12 @@ def execute_model_research_via_subscriptions(sql: Type[Database_Service], wrkflw
 def model_research(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service], model_list:list):
     ps: Type[Parsing_Service] = sql.aws.ps
     ts: Type[Timer_Service] = sql.aws.ts
+    local_debug = DEBUG_APP
+    local_debug = True
 
     # run each model
-    input_row_count = 0
-    result_write_count = 0
-    ai_question_count = 0
     for model_dict in model_list:
+        if local_debug: print(f"model_research START {ts.stopwatch()}: {model_dict}")
         # for each key,value pair present in the model_list
         for key, value in model_dict.items():
             wrkflw.add_replacement_pair(f'</{key}/>', model_dict[key])
@@ -923,60 +929,95 @@ def model_research(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service
             
             version_id = temp_dict['id']
             wrkflw.add_replacement_pair('</version_id/>', version_id)
-            success, payload = ps.json_from_var(temp_dict['payload'], True)
+            success, payload = ps.json_from_var(temp_dict['payload'])
             # if DEBUG_APP: print(f"[105] type:{type(payload)} payload:{payload}")
-            workflow = payload['workflow']
-            prompt_template = ""
+            workflow_instructions = payload['workflow']
+            success = recursive_model_research_workflow(sql, wrkflw, workflow_instructions)
+        if local_debug: print(f"model_research FINISH {ts.stopwatch()}: {model_dict}")
 
-            # Execution Variables
-            driver_df = pd.DataFrame()
-            ai_engine = "OpenAI"
-            driver_replacement_list = []
-            system_missing_dict = {}
-            output_table_alias = '</$research_results$/>'
-            output_payload_keys = []
-            prompt_response_type = 'json'
+def workflow_instruction_chain(instruction_list:list, index: int, stop_instruction: str, stop_value: str) -> tuple[list, int]:
+    sub_workflow = []
+    sub_success = True
+    while index < len(instruction_list) and sub_success:
+        sub_item = instruction_list[index]
+        index += 1
+        if stop_instruction in sub_item.keys():
+            if sub_item[stop_instruction] == stop_value or len(stop_value) == 0:
+                break
+            else:
+                sub_workflow.append(sub_item)
+        else:
+            sub_workflow.append(sub_item)
+    return sub_workflow, index
 
-            # Do the setup on for the model Version
-            for item in workflow:
-                # AI_DRIVER gets the agnostic information to drive the query
-                if 'AI_DRIVER' in item.keys():
-                    query = ps.dict_lookup('AI_DRIVER', item)
-                    query = wrkflw.solve_text_replacements(query)
-                    if DEBUG_APP: print(query)
-                    success, driver_df = sql.sql(query)
-                elif 'REFERENCE_COLUMNS' in item.keys():
-                    driver_replacement_list = ps.dict_lookup('REFERENCE_COLUMNS', item)
-                elif 'SYSTEM_MISSING' in item.keys():
-                    system_missing_dict = ps.dict_lookup('SYSTEM_MISSING', item)
-                elif 'PERPLEXITY' in item.keys():
-                    prompt_template = ps.dict_lookup('PERPLEXITY', item)
-                    ai_engine = "Perplexity"
-                elif 'OPENAI' in item.keys():
-                    prompt_template = ps.dict_lookup('OPENAI', item)
-                    ai_engine = "OpenAI"
-                elif 'AI_RESPONSE_TYPE' in item.keys():
-                    prompt_response_type = ps.dict_lookup('AI_RESPONSE_TYPE', item)
-                elif 'INSERT_TABLE' in item.keys():
-                    output_table_alias = ps.dict_lookup('INSERT_TABLE', item)
-                elif 'INSERT_PAYLOAD' in item.keys():
-                    output_payload_keys = ps.dict_lookup('INSERT_PAYLOAD', item)
-                else:
-                    print(f'model_research: BAD WORKFLOW COMMAND', item)
-                    exit(0)
-            if ai_engine == 'OpenAI':
-                ai_client = OpenAI_Service(sql.aws)
-            elif ai_engine == 'Perplexity':
-                ai_client = Perplexity_Service(sql.aws)
+def recursive_model_research_workflow(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service], instruction_list:list) -> bool:
+    ps: Type[Parsing_Service] = sql.aws.ps
+    ts: Type[Timer_Service] = sql.aws.ts
+
+    local_debug = False
+
+    # Execution Variables
+    prompt_template = ""
+    system_missing_dict = {}
+    output_table_alias = '</$research_results$/>'
+    output_target_columns = []
+
+    success = True
+
+    index = 0
+    while success and index < len(instruction_list):
+        
+        current_instruction: dict = instruction_list[index]
+        if local_debug: print(f"DEBUG: {current_instruction}")
+        index += 1
+
+        # INSTRUCTION: {'FOR': {'END_TAG': 'A', 'ITEM': '</$state_item$/>', 'IN_LIST': '</$state_code_list$/>'}}
+        # INSTRUCTION: {'END': 'A'}
+        if 'FOR' in current_instruction.keys():
+            value = current_instruction['FOR']
+            for_item_key = value['ITEM']
+            if 'IN_LIST' in value.keys():
+                # LIST PROCESSING
+                for_list = wrkflw.retrieve_replacement_value(value['IN_LIST'],[])
+            elif 'IN_RANGE' in value.keys():
+                range_dict = value['IN_RANGE']
+                index = int(range_dict['FIRST'])
+                last = int(range_dict['last'])
+                for_list = []
+                while index <= last:
+                    for_list.append(index)
+                    index += 1
+            else:
+                print(f"recursive_model_research_workflow: BAD 'FOR' STRUCTURE: {current_instruction}")
+                exit(0)
+        
+            end_tag = ps.dict_retrieve_value(value, 'END_TAG', "")
+            sub_workflow, index = workflow_instruction_chain(instruction_list, index, 'END', end_tag)
+            # print(f"[debug: 'FOR' {for_list} sub_workflow: {sub_workflow}")
+            # wrkflw.dump_replacement_dict()
+            for item in for_list:
+                # print(f"[debug: 'FOR ITEM' {item}")
+                wrkflw.add_replacement_pair(for_item_key, item)
+                success = recursive_model_research_workflow(sql, wrkflw, sub_workflow)
+                if not success: break
             
-            # response type
-            prompt_response_type = prompt_response_type.lower()
-            if prompt_response_type not in ['json','dict']:
-                print(f"FATAL AI_RESPONSE_TYPE: must be json or dict: not {prompt_response_type}")
+        # SQL gets the agnostic information to drive the query
+        elif 'SQL' in current_instruction.keys():
+            dict_format = ps.dict_lookup('SQL', current_instruction)
+            if isinstance(dict_format, str):
+                dict_format = {"QUERY": dict_format, "END_TAG": ""}
+            elif not isinstance(dict_format, dict):
+                print(f"recursive_model_research_workflow: BAD SQL FORMAT: {current_instruction}")
+                exit(0)
+
+            query = wrkflw.solve_text_replacements(dict_format['QUERY'])
+            if DEBUG_APP: print(query)
+            success, driver_df = sql.sql(query)
+            end_tag = ps.dict_retrieve_value(dict_format, "END_TAG", "")
+            sub_workflow, index = workflow_instruction_chain(instruction_list, index, 'END', end_tag)
 
             # RUN THROUGH THE DRIVER FILE NOW
             for r_index, r_row in driver_df.iterrows():
-                input_row_count += 1
                 if DEBUG_APP: print("DEBUG: r_row:", "\n", r_row, "\n")
 
                 # check the date or if no date then to it
@@ -991,54 +1032,118 @@ def model_research(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service
                         pass
                 else:
                     success = True
-
                 if success:
-                    if ai_question_count % 5 == 0:
-                        print(f"research_execution Loop timer {sql.aws.ts.stopwatch()}: {ai_question_count} ai questions asked " + \
-                              f"{input_row_count} input rows read " + \
-                              f"{result_write_count} result rows written  {model_dict['model_id']}")
-                    wrkflw.add_replacement_pair('</entity_metadata_id/>', r_row['entity_metadata_id'])
-                    # replace each of the items
-                    for replacement_item in driver_replacement_list:
-                        value = r_row[replacement_item]
-                        if value is None:
-                            if replacement_item in system_missing_dict:
-                                value = system_missing_dict[replacement_item]
-                        wrkflw.add_replacement_pair(replacement_item, value)
+                    if wrkflw.ai_submit_count % 5 == 0:
+                        print(f"recursive_model_research_workflow Loop timer {ts.stopwatch()}: {wrkflw.ai_submit_count} ai questions asked " + \
+                                f"{wrkflw.write_count} result rows written")
+                        # this is to reset the model conversation with a new model cursor
+                        if wrkflw.ai_engine == 'OpenAI':
+                            wrkflw.ai_client = OpenAI_Service(sql.aws)
+                        elif wrkflw.ai_engine == 'Perplexity':
+                            wrkflw.ai_client = Perplexity_Service(sql.aws)
+                
+                    # move all row items into replacement_pairs
+                    for key, value in r_row.items():
+                        wrkflw.add_replacement_pair(f'</{key}/>', value)
 
-                    # ASK AI THE QUESTION
-                    prompt = wrkflw.solve_text_replacements(prompt_template)
-                    if DEBUG_APP: print(prompt)
-                    ai_question_count += 1
-                    response = ai_client.submit_inquiry(prompt)
-                    if DEBUG_APP: print(response)
-                    if prompt_response_type == 'json':
-                        success, json_response = ps.json_from_var(response)
-                    elif prompt_response_type == 'dict':
-                        json_response = ast.literal_eval(response)
-                        if isinstance(json_response, dict):
-                            success = True
-                        else:
-                            success = False
+                    if 'entity_metadata_id' in r_row.keys():
+                        wrkflw.add_replacement_pair('</$$metadata_id_sql$$/>', 'UPDATE')
                     else:
-                        print("FATAL model research: invalie AI_PROMPT_RESPONSE processing type {prompt_response_type}")
-                        exit(0)
+                        wrkflw.add_replacement_pair('</entity_metadata_id/>', uuid4())
+                        wrkflw.add_replacement_pair('</$$metadata_id_sql$$/>', 'INSERT')
+                        
+                    success = recursive_model_research_workflow(sql, wrkflw, sub_workflow)
+                    if not success: break
+        elif 'STORE_AI_RESULTS' in current_instruction.keys():
+            # if the keys are in the result, then move them to an installation list
+            # if they are not in the result from AI then remove them
+            pass           
+        elif 'SYSTEM_MISSING' in current_instruction.keys():
+            # THIS COMMAND adds a key and value to the replacement dict and can be placed inside a loop before AI runs
+            system_missing_dict: dict = ps.dict_lookup('SYSTEM_MISSING', current_instruction)
+            for key, value in system_missing_dict.items():
+                held_value = wrkflw.retrieve_replacement_value(f'</{key}/>', None)
+                if held_value is None:
+                    wrkflw.add_replacement_pair(f'</{key}/>', value)
+        elif 'PERPLEXITY' in current_instruction.keys():
+            prompt_template = ps.dict_lookup('PERPLEXITY', current_instruction)
+            wrkflw.ai_engine = "Perplexity"
+            wrkflw.ai_client = Perplexity_Service(sql.aws)
+            # ASK AI THE QUESTION
+            prompt = wrkflw.solve_text_replacements(prompt_template)
+            if DEBUG_APP: print(prompt)
+            wrkflw.ai_submit_count += 1
+            wrkflw.ai_response = wrkflw.ai_client.submit_inquiry(prompt)
+            if DEBUG_APP: print(wrkflw.ai_response)
 
-                    if success:
-                        result_write_count += recursive_result_insert(sql, wrkflw, output_table_alias, output_payload_keys, "AI RESPONSE", json_response, )
-                    else:
-                        # if the AI returned a verbose answer out of format - write a record to record the data as a note
-                        if output_table_alias == '</$research_results$/>':
-                            payload = {'note': response}
-                            write_research_results(sql, wrkflw, False, payload)
-                        else:    
-                            if DEBUG_APP: print(f"DEBUG: @@@@model_research SKIPPING Verbose AI: {response}")
+        elif 'OPENAI' in current_instruction.keys():
+            prompt_template = ps.dict_lookup('OPENAI', current_instruction)
+            wrkflw.ai_engine = "OpenAI"
+            wrkflw.ai_client = OpenAI_Service(sql.aws)
+            # ASK AI THE QUESTION
+            prompt = wrkflw.solve_text_replacements(prompt_template)
+            if DEBUG_APP or local_debug: print(prompt)
+            wrkflw.ai_submit_count += 1
+            wrkflw.ai_response = wrkflw.ai_client.submit_inquiry(prompt)
+            if DEBUG_APP or local_debug: print(wrkflw.ai_response)
 
-                if ai_question_count > AI_BATCH_LIMIT and result_write_count > 2:
-                    break
-        print(f"research_execution Loop timer {sql.aws.ts.stopwatch()}: {ai_question_count} ai questions asked " + \
-                              f"{input_row_count} input rows read " + \
-                              f"{result_write_count} result rows written  Model FINAL")
+        elif 'AI_RESPONSE_TYPE' in current_instruction.keys():
+            wrkflw.ai_prompt_response_type = ps.dict_lookup('AI_RESPONSE_TYPE', current_instruction)
+            if wrkflw.ai_prompt_response_type not in ['json','dict']:
+                print(f"FATAL AI_RESPONSE_TYPE: must be json or dict: not {wrkflw.ai_prompt_response_type}")
+                exit(0)            
+        # TARGET_COLUMNS is replacing INSERT_PAYLOAD, UPSERT_PAYLOAD
+        elif 'TARGET_COLUMNS' in current_instruction.keys():
+            output_target_columns = ps.dict_lookup('TARGET_COLUMNS', current_instruction)
+        elif 'TARGET_DEFAULT_COLUMN_VALUES' in current_instruction.keys():
+            wrkflw.add_replacement_pair('</$$entity_metadata_defaults$$/>', ps.dict_lookup('TARGET_DEFAULT_COLUMN_VALUES', current_instruction))
+        elif 'RECORD_RESEARCH' in current_instruction.keys():
+            output_table_alias = ps.dict_lookup('RECORD_RESEARCH', current_instruction)
+            if wrkflw.ai_prompt_response_type == 'json':
+                success, json_response = ps.json_from_var(wrkflw.ai_response)
+            elif wrkflw.ai_prompt_response_type == 'dict':
+                try:
+                    json_response = ast.literal_eval(wrkflw.ai_response)
+                except:
+                    json_response = {}
+                    success = False
+                if isinstance(json_response, dict):
+                    success = True
+                else:
+                    success = False
+            if success:
+                # print("output_target_columns", output_target_columns)
+                # wrkflw.dump_replacement_dict()
+                wrkflw.write_count += recursive_result_drill_down(sql, wrkflw, output_table_alias, output_target_columns, "AI RESPONSE", json_response)
+            else:
+                # if the AI returned a verbose answer out of format - write a record to record the data as a note
+                if output_table_alias == '</$research_results$/>':
+                    payload = {'note': wrkflw.ai_response}
+                    write_research_results(sql, wrkflw, False, payload)
+                else:   
+                    if DEBUG_APP: print(f">>>DEBUG: recursive_model_research_workflow SKIPPING Verbose AI: {wrkflw.ai_response}")
+                    pass
+
+        elif 'COMMENT' in current_instruction.keys():
+            comment_text = wrkflw.solve_text_replacements(current_instruction['COMMENT'])
+            print(f"recursive_model_research_workflow: COMMENT: {comment_text}")
+            pass
+        elif 'END' in current_instruction.keys():
+            pass
+        elif 'STOP' in current_instruction.keys():
+            print('FATAL END: STOP ENCOUNTERED IN INSTRUCTIONS')
+            exit(0)
+        else:
+            print(f'recursive_model_research_workflow: BAD WORKFLOW COMMAND', current_instruction)
+            exit(0)
+
+        """
+        if wrkflw.ai_submit_count > AI_BATCH_LIMIT and local_debug:
+            print("debug termination")
+            exit(0)
+        """
+
+    return success
         
 def write_research_results(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service], result_success: bool, payload: json) -> str|int|UUID:
     ts: Type[Timer_Service]= sql.aws.ts
@@ -1070,7 +1175,8 @@ def write_research_results(sql: Type[Database_Service], wrkflw: Type[Workflow_PL
         else:
             print(f'WARNING: write_research_results - NO UPDATE: multiple results found model:{model_id} entity:{entity_metadata_id}')
 
-def update_metadata_results(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service], payload_updates: json) -> str|int|UUID:
+def upsert_entity_metadata_table(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service], 
+                                 payload_updates: json, data_dict: dict={}) -> str|int|UUID:
     ts: Type[Timer_Service]= sql.aws.ts
 
     model_id = wrkflw.solve_text_replacements('</model_id/>')
@@ -1078,23 +1184,43 @@ def update_metadata_results(sql: Type[Database_Service], wrkflw: Type[Workflow_P
     entity_metadata_id = wrkflw.solve_text_replacements('</entity_metadata_id/>')
     output_table_name = wrkflw.solve_text_replacements('</$entity_metadata$/>')
 
-    # get the current row
-    query = "select payload from {output_table_name} where id = '{entity_metadata_id}'"
-    success, result = sql.sql(query)
+    if wrkflw.does_replacement_value_match('</$$metadata_id_sql$$/>', 'INSERT'):
+        if 'entity_name' not in data_dict.keys():
+            print(f"FATAL upsert_entity_metadata_table: INSERT operation: key:'entity_name' missing from: {data_dict}")
+            exit(0)
+        if 'entity_type' not in data_dict.keys():
+            print(f"FATAL upsert_entity_metadata_table: INSERT operation: key:'entity_type' missing from: {data_dict}")
+            exit(0)
+        data_dict['id'] = entity_metadata_id
+        data_dict['results'] = json.dumps(payload)
+        success, key = sql.insert_from_dict(table=output_table_name, key_columns=['id'], 
+                                                    data_columns=list(data_dict.keys()), data_dict=data_dict)
+    else:
+        # get the current row
+        query = f"select payload from {output_table_name} where id = '{entity_metadata_id}'"
+        success, result = sql.select_to_dict(query=query, columns=['payload'])
 
-    payload = json.loads(result['payload'])
-    for key, value in payload_updates.items():
-        payload[key] = value
-    payload = json.dumps(payload)
+        if isinstance(result['payload'], str):
+            payload = json.loads(result['payload'])
+        else:
+            payload = result['payload']
 
-    data_dict = {'id': entity_metadata_id, 'results': payload, 'updated_on': "timezone('UTC'::text, now()"}
-    success, key = sql.update(table=output_table_name, where_key='id', data=data_dict)
+        for key, value in payload_updates.items():
+            payload[key] = value
+        payload = json.dumps(payload)
 
-def recursive_result_insert(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service], 
-                            output_table_alias: str, output_payload_keys: list, parent_key: str, 
+        data_dict = {'id': entity_metadata_id, 'payload': payload}
+        success, key = sql.update(table=output_table_name, where_key='id', data=data_dict)
+
+def recursive_result_drill_down(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service], 
+                            output_table_alias: str, output_target_columns: list, parent_key: str, 
                             json_response: any) -> int:
+    
+    # print(f"[318] recursive_result_drill_down: {output_table_alias} {output_target_columns} {json_response}")
+
     """
     return: rows_written
+    * parent_key is NOT USED as we drill down
     """
 
     local_debug = True
@@ -1114,22 +1240,32 @@ def recursive_result_insert(sql: Type[Database_Service], wrkflw: Type[Workflow_P
         return False
     
     # THIS WAS ALL ... changed to ANY
-    success, found, missing = ps.verify_lists(output_payload_keys, key_list, compare='ANY')
+    success, found, missing = ps.verify_lists(output_target_columns, key_list, compare='ANY')
     if success:
         # build the payload
         payload = {}
+        # load the payload with information from the replacement_dict
+        for item in output_target_columns:
+            if wrkflw.does_replacement_key_exist(item):
+                payload[item] = wrkflw.retrieve_replacement_value(item, None)
+
+        # overwrite payload with information from json_response
         for key, value in json_response.items():
-            if key in output_payload_keys:
+            if key in output_target_columns:
                 payload[key] = value
         # build the record and insert
         if output_table_alias == '</$research_results$/>':
             write_research_results(sql, wrkflw, True, payload)
             rows_written += 1
         elif output_table_alias == '</$entity_metadata$/>':
-            update_metadata_results(sql, wrkflw, True, payload)
+            # move the default values for an INSERT here if they exist
+            data_dict = wrkflw.retrieve_replacement_value('</$$entity_metadata_defaults$$/>', {})
+            upsert_entity_metadata_table(sql, wrkflw, payload, data_dict)
+        else:
+            print(f'[319] BAD TARGET TABLE: {output_table_alias}')
     else:
         for key, value in json_response.items():
-            rows_written += recursive_result_insert(sql, wrkflw, output_table_alias, output_payload_keys, key, value)
+            rows_written += recursive_result_drill_down(sql, wrkflw, output_table_alias, output_target_columns, key, value)
     
     return rows_written
 
@@ -1248,7 +1384,7 @@ def rebuild_lower_enviroment(sql: Type[Database_Service], wrkflw: Type[Workflow_
 
     if user_target_env == ENV_PROD:
         input = console_input("SAFETY CHECK: Overwriting PRODUCTION confirm by typing YES:")
-        if input != "YES":
+        if str(input).upper() != "YES":
             print(f"SAFETY FAIL rebuild_lower_enviroment - target environment of PROD found")
             exit(0)
 
@@ -1332,12 +1468,12 @@ def df_to_table_using_CRUD(sql: Type[Database_Service], df: pd.DataFrame, tablen
                     # if DEBUG_APP: print(f"[107e] type:{type(data_dict[key])}")
                     try:
                         data_dict[key] = json.dumps(mv_row[key])
-                        if DEBUG_APP: print(f"[107f] type:{type(data_dict[key])}")
+                        # if DEBUG_APP: print(f"[107f] type:{type(data_dict[key])}")
                     except:
                         print(f"FATAL df_to_table_using_CRUD - json.loads error {mv_row[key]}")
                         exit(0)
         
-        if DEBUG_APP: print(f'[107b] {data_dict}')
+        # if DEBUG_APP: print(f'[107b] {data_dict}')
 
         # if the primary key is empty, then generate one        
         if len(ps.cleanse_string_nan(data_dict[primary_key])) == 0:
@@ -1362,7 +1498,7 @@ def df_to_table_using_CRUD(sql: Type[Database_Service], df: pd.DataFrame, tablen
                     data_dict[key] = value
 
         if str(mv_row['CRUD']).upper() == 'UPDATE':
-            if DEBUG_APP: print(f"[107] UPDATE: {data_dict}")
+            # if DEBUG_APP: print(f"[107] UPDATE: {data_dict}")
             success, result = sql.update(table=tablename, where_key=primary_key, 
                                         data=data_dict)
         elif str(mv_row['CRUD']).upper() in ['CREATE', 'INSERT']:
@@ -1440,7 +1576,15 @@ def main():
                                       '</$research_results$/>','</$client_entity_accounts$/>','</$ua_clients$/>','</$research_drivers$/>',
                                       '</$entity_aliases$/>']
                 rebuild_lower_enviroment(sql, wrkflw, rebuild_table_list, aws.target_env)
-                # ====================================================================================================
+                # ====================================================================================================    
+            elif str(action_row['Action']).upper() == 'REBUILD UPPER ENVIRONMENTS':
+                # THIS BLOCK OF CODE: COPIES DATA RDS PROD TABLES TO DEV for testing
+                print(aws.ts.timestamp("Start rebuild upper environments"))
+                rebuild_table_list = ['</$client_subscriptions$/>','</$ai_models$/>','</$ai_model_versions$/>','</$entity_metadata$/>',
+                                      '</$research_results$/>','</$client_entity_accounts$/>','</$ua_clients$/>','</$research_drivers$/>',
+                                      '</$entity_aliases$/>']
+                rebuild_lower_enviroment(sql, wrkflw, rebuild_table_list, ENV_PROD, ENV_DEV)
+                # ====================================================================================================   
             elif str(action_row['Action']).upper() == 'RELOAD UA.CLIENTS':
                 # THIS BLOCK OF CODE: COPIES DATA FROM AURORA PROD TO RDS DEV - Create function needs manual operation
                 print(aws.ts.timestamp("Start federated migration of ua.clients"))
