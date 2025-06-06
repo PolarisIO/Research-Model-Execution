@@ -1123,7 +1123,7 @@ def recursive_model_research_workflow(sql: Type[Database_Service], wrkflw: Type[
             # {"END_IF": "tag" }
             if_dict: dict = current_instruction['IF']
             expression: str = if_dict['CONDITION']
-            tag = if_dict['TAG']
+            end_tag = if_dict['TAG']
 
             sub_workflow, index = workflow_instruction_chain(instruction_list, index, 'END', end_tag)
             # split_workflow
@@ -1264,6 +1264,7 @@ def recursive_model_research_workflow(sql: Type[Database_Service], wrkflw: Type[
                     if success: wrkflw.rows_written += 1
                 else:
                     # do an insert
+                    # HERE HERE HERE NEED TO MAKE A KEY_COLUMNS FIELD >>>> DEBUG DEBUG
                     success, key = sql.insert_from_dict(table=output_table_name, key_columns=key_columns, 
                                                         data_columns=list(data_dict.keys()), data_dict=data_dict)
                     if success: wrkflw.rows_written += 1

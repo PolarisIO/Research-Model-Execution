@@ -248,11 +248,10 @@ class Workflow_PL_Service:
     def var_text_replacement(self, in_text: str) -> str:
         out_text = in_text
         for k1, v1 in self.var_dict.items():
-            if v1['TYPE'] == 'df':
-                print(f"FATAL var_text_replacements: dataframe not compatible with text: {in_text}")
-                exit(0)
-            if k1 in out_text:
-                out_text = out_text.replace(k1, str(v1['VALUE']))
+            # MAY NEED TO ADD OTHER TYPES TO IGNORE HERE
+            if v1['TYPE'] not in ['df']:
+                if k1 in out_text:
+                    out_text = out_text.replace(k1, str(v1['VALUE']))
         return out_text
     
     def solve_eval_replacements(self, in_text) -> tuple[str,dict]:
