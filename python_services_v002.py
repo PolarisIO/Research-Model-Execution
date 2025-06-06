@@ -178,10 +178,16 @@ class Parsing_Service:
         if local_debug: print(f"[210.99] type:{type(return_json)} success:{success} return:{return_json}")
         return success, return_json
     
-    def dict_retrieve_value(self, src_dict: dict, find_key: str, system_missing_value: any) -> any:
-        if find_key not in src_dict.keys():
+    def dict_lookup(self, target_dict: dict|str, find_key: dict|str, system_missing_value: any) -> any:
+        # flip the parameters on older calls
+        if isinstance(find_key, dict):
+            temp = find_key
+            find_key = target_dict
+            target_dict = temp
+
+        if find_key not in target_dict.keys():
             return system_missing_value
-        return src_dict[find_key]
+        return target_dict[find_key]
 
     def list_append_unique(self, list1: list, list2: list) -> list:
         set1 = set(list1)
@@ -189,17 +195,18 @@ class Parsing_Service:
         combined_set = set1.union(set2)
         return list(combined_set)
 
-    def dict_lookup(self, term: str, term_dict: dict, default=None) -> str|list|dict|pd.DataFrame:
-        if term in term_dict.keys():
-            return term_dict[term]
-        return default
-
     def dict_manditory_lookup(self, term: str, term_dict: dict, default=None) -> str|list|dict|pd.DataFrame:
         if term not in term_dict.keys():
             print(f'FATAL ERROR: dict_manditory_lookup: {term} {term_dict}')
             exit(0)
         return self.dict_lookup(term, term_dict, default)
     
+    def kwargs_key_exists(self, term, **kwargs):
+        if term in kwargs.keys():
+            return True
+        else:
+            return False
+
     def kwargs_lookup(self, term: str, default: str|list|dict|pd.DataFrame, **kwargs) -> str|list|dict|pd.DataFrame:
         if term in kwargs.keys():
             return kwargs[term]

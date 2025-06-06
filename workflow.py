@@ -46,22 +46,20 @@ class Workflow_PL_Service:
 
         self.parent: Type[Workflow_PL_Service] = parent_workflow_pl_service
         self.children: list = []
-        self.var_dict: dict = {}
         self.return_dict: dict = {}
         self.workflow = []
         self.workflow_index = 0
-        self.replace_dict = {}
-        self.global_replace_dict = {}
- 
+
+        self.replace_status_dict = {}
+
+        # {"KEY": {"VALUE": <val>, "TYPE": "int"|"str"|"dict", "SCOPE":"global"}}
+        self.var_dict: dict = {}
+        
         self.next_dataframe_index = 0
-        self.dataframes = []
-        self.ai_engine = "OpenAI"
-        self.ai_client = OpenAI_Service(sql.aws)
-        self.ai_prompt_response_type = 'json'
-        self.ai_response = ""
+        self.dataframe_objects = []
 
         self.ai_submit_count = 0
-        self.write_count = 0
+        self.rows_written = 0
 
         self.reset()
 
@@ -69,52 +67,121 @@ class Workflow_PL_Service:
         # destructor called during >> del p.Replacement
         self.reset()
 
+    def var_reset(self, **kwargs):
+        """
+        parms: dict=<dict>, keep_scope=<list>, drop_scope=<list>
+        """
+        target_dict: dict = self.ps.kwargs_lookup('dict',self.var_dict)
+        keep_scope: list = self.ps.kwargs_lookup('keep_scope',['global'])
+        drop_scope: list = self.ps.kwargs_lookup('drop_scope',[])
+
+        control_dict = target_dict.copy()
+        for k, v in control_dict.items():
+            scope = self.ps.dict_lookup(v,'SCOPE','')
+            if len(drop_scope):
+                if scope in drop_scope:
+                    if scope not in keep_scope:
+                        del target_dict[k]
+            elif len(keep_scope):
+                if scope not in keep_scope:
+                    del target_dict[k]
+        self.replacement_dict = target_dict.copy()
+
     def reset(self):
         for obj in self.children:
             del obj
 
-        self.var_dict = {}
-        self.replace_dict = {}
+        self.var_reset()
         # system defined variables
-        self.add_replacement_pair('$YYYY_MM_DD$', self.ts.run_stamp_YYYYMMDD)
-        self.add_replacement_pair('$db_env$', self.aws.target_env)
-        self.add_replacement_pair('$state_code_list$', ['AK','AL','AR','AZ','CA','CO','CT','DC','DE','FL','GA','HI',
+        self.set_var('$YYYY_MM_DD$', value=self.ts.run_stamp_YYYYMMDD, scope="global")
+        self.set_var('$db_env$', value=self.aws.target_env, scope="global")
+        self.set_var('$state_code_list$', value=['AK','AL','AR','AZ','CA','CO','CT','DC','DE','FL','GA','HI',
                                                         'IA','ID','IL','IN','KS','KY','LA','MA','MD','ME','MI','MN','MO','MS',
                                                         'MT','NC','ND','NE','NH','NJ','NM','NV','NY','OH','OK','OR',
-                                                        'PA','RI','SC','SD','TN','TX','UT','VA','VT','WA','WI','WV','WY'])
-        self.add_replacement_pair('$calendar_month_list$', ['JANUARY','FEBRUARY','MARCH','APRIL','MAY','JUNE',
-                                                            'JULY','AUGUST','SEPTEMBER','OCTOBER','NOVEMBER','DECEMBER'])
+                                                        'PA','RI','SC','SD','TN','TX','UT','VA','VT','WA','WI','WV','WY'], scope="global")
+        self.set_var('$calendar_month_list$', value=['JANUARY','FEBRUARY','MARCH','APRIL','MAY','JUNE',
+                                                            'JULY','AUGUST','SEPTEMBER','OCTOBER','NOVEMBER','DECEMBER'], scope="global")
         
-        for k, v in self.global_replace_dict.items():
-            self.replace_dict[k] = v
-
         if self.parent != None:
             for p_key, p_item in self.parent.var_dict:
                 self.var_dict[p_key] = p_item
 
         self.workflow_index = 0
         self.return_dict = {}
+
+    def retrieve_dataframe(self, key: str) -> pd.DataFrame:
+        if key in self.dataframe_objects.keys():
+            df: pd.DataFrame = self.dataframe_objects[key]
+            return df.copy()
+        return pd.DataFrame()
     
-    def dump_replacement_dict(self):
-        for k,v in self.replace_dict.items():
+    def dump_var_dict(self):
+        for k,v in self.var_dict.items():
             print(f"replacement_dict {k}:{v}")
 
-    def sanitize_replacement_key(self, key: str) -> str:
+    def sanitize_var_key(self, key: str) -> str:
         ready_key = key
         if LEADING_REPLACEMENT != ready_key[0:len(LEADING_REPLACEMENT)]:
             ready_key = LEADING_REPLACEMENT + ready_key
         if TRAILING_REPLACEMENT != ready_key[-len(TRAILING_REPLACEMENT):]:
             ready_key = ready_key + TRAILING_REPLACEMENT
         return ready_key
+        
+    def set_var(self, key: str, **kwargs):
+        """
+        kwargs: scope=, type=,
+        """
+        ready_key = self.sanitize_var_key(key)
+        if ready_key in self.var_dict.keys():
+            var_details = self.var_dict[ready_key]
+        else:
+            var_details = {}
 
-    def add_replacement_pair(self, key: str, value: str):
-        ready_key = self.sanitize_replacement_key(key)
-        self.replace_dict[ready_key] = value
-    
-    def add_global_replacement_pair(self, key: str, value: str):
-        ready_key = self.sanitize_replacement_key(key)
-        self.global_replace_dict[ready_key] = value
-        self.add_replacement_pair(ready_key, value)
+        if self.ps.kwargs_key_exists('scope'):
+            var_details['SCOPE'] = kwargs['scope']
+
+        if self.ps.kwargs_key_exists('value'):
+            var_details['VALUE'] = kwargs['value']
+
+        if self.ps.kwargs_key_exists('system_missing'):
+            var_details['SYSTEM_MISSING'] = kwargs['system_missing']
+
+        if self.ps.kwargs_key_exists('type'):
+            var_details['TYPE'] = str(kwargs['type']).lower()
+        else:
+            if self.ps.kwargs_key_exists('system_missing') or self.ps.kwargs_key_exists('value'):
+                if self.ps.dict_key_exists(var_details, 'VALUE'):
+                    value = var_details['VALUE']
+                else:
+                    value = var_details['SYSTEM_MISSING']
+                if isinstance(value, str): var_details['TYPE'] = "str"
+                elif isinstance(value, int): var_details['TYPE'] = "int"
+                elif isinstance(value, float): var_details['TYPE'] = "float"
+                elif isinstance(value, dict): var_details['TYPE'] = "dict"
+                elif isinstance(value, bool): var_details['TYPE'] = "bool"
+                elif isinstance(value, list): var_details['TYPE'] = "list"
+                elif isinstance(value, JSON): var_details['TYPE'] = "json"
+                else: var_details['TYPE'] = "any"
+
+                if var_details['TYPE'] in ['df','dict','json','list']:
+                    if self.ps.kwargs_key_exists('value'):
+                        var_details['VALUE'] = value.copy()
+                    if self.ps.kwargs_key_exists('system_missing'):
+                        var_details['SYSTEM_MISSING'] = value.copy()
+
+    def get_var(self, key: str, system_missing: any=None) -> any:
+        ready_key = self.sanitize_var_key(key)
+        if ready_key in self.var_dict.keys():
+            value_details = self.var_dict[ready_key]
+            if 'VALUE' in value_details.keys():
+                return value_details['VALUE']
+            elif 'SYSTEM_MISSING' in value_details.keys():
+                return value_details['SYSTEM_MISSING']
+        if system_missing == None: 
+            print(f"FATAL get_var: invalid key {key} without system_missing")
+            self.dump_var_dict()
+            exit(0)
+        return system_missing
 
     def intelligent_token_dict_replacements(self, intel_token_dict: dict) -> dict:
         wf_token_list = intel_token_dict['term_list']
@@ -123,8 +190,9 @@ class Workflow_PL_Service:
         for token in wf_token_list:
             token_dict = intel_token_dict[token_position]
             if token_dict['type'] == "replacement":
-                if token in self.replace_dict.keys():
-                    out_list.append(self.replace_dict[token])
+                if token in self.var_dict.keys():
+                    token_detail = self.var_dict[token]
+                    out_list.append(token_detail['VALUE'])
                 else:
                     print('Fatal: intelligent_token_dict_replacements:', token)
                     exit(0)
@@ -134,50 +202,52 @@ class Workflow_PL_Service:
         intel_token_dict['term_list'] = out_list
         return intel_token_dict
     
-    def does_replacement_value_match(self, replacement_key: str, replacement_value: any) -> bool:
-        ready_key = self.sanitize_replacement_key(replacement_key)
-        success = False
-        if ready_key in self.replace_dict.keys():
-            if self.replace_dict[ready_key] == replacement_value:
-                success = True
-        return success
+    def does_var_value_match(self, var_key: str, var_value: any) -> bool:
+        ready_key = self.sanitize_var_key(var_key)
+        if ready_key in self.var_dict.keys():
+            var_details = self.var_dict[ready_key]
+            if 'VALUE' in var_details.keys():
+                if var_details['VALUE'] == var_value:
+                    return True
+        return False
 
-    def does_replacement_key_exist(self, replacement_key: str) -> bool:
-        ready_key = self.sanitize_replacement_key(replacement_key)
-        success = False
-        if ready_key in self.replace_dict.keys():
-            success = True
-        return success
+    def does_var_key_exist(self, var_key: str) -> bool:
+        ready_key = self.sanitize_var_key(var_key)
+        if ready_key in self.var_dict.keys():
+            return True
+        return False
     
-    def retrieve_replacement_value(self, replacement_key: str, system_missing_value: any) -> any:
-        ready_key = self.sanitize_replacement_key(replacement_key)
-        print(f"retrieve_replacement_value {replacement_key} {ready_key}")
-        if ready_key not in self.replace_dict.keys():
-            return system_missing_value
-        return self.replace_dict[ready_key]
+    def var_keylist(self) -> list:
+        return list(self.var_dict.keys())
+    
+    def old_var_text_replacement(self, in_text: str, **kwargs) -> str:
+        return self.var_text_replacement(in_text)
 
-    def solve_text_replacements(self, in_text: str, **kwargs) -> str:
+    def var_text_replacement(self, in_text: str) -> str:
         out_text = in_text
-        for k1, v1 in self.replace_dict.items():
+        for k1, v1 in self.var_dict.items():
+            if v1['TYPE'] == 'df':
+                print(f"FATAL var_text_replacements: dataframe not compatible with text: {in_text}")
+                exit(0)
             if k1 in out_text:
-                out_text = out_text.replace(k1, str(v1))
+                out_text = out_text.replace(k1, str(v1['VALUE']))
         return out_text
+    
+    def solve_eval_replacements(self, in_text) -> tuple[str,dict]:
+        out_text = in_text
+        index = 0
+        eval_dict = {}
 
-    def fatal_error_check(self, success: bool, **kwargs):
-        if not success:
-            print('======= FATAL ERROR')
-            if self.workflow_index < len(self.workflow):
-                print(f'workflow[workflow_index]: {self.workflow[self.workflow_index]}')
-            else:
-                print(f'workflow_index:{self.workflow_index}')
-            print(f'workflow: {self.workflow}')
-            for fatal_error_key, fatal_error_value in kwargs.items():
-                print(f'kwargs: {fatal_error_key}: {fatal_error_value}')
-            for fatal_error_key, fatal_error_value in self.replace_dict.items():
-                print(f'replace_dict: {fatal_error_key}: {fatal_error_value}')
-            for fatal_error_key, fatal_error_value in self.var_dict.items():
-                print(f'var_dict: {fatal_error_key}: {fatal_error_value}') 
-            exit(0)
+        for k1, v1 in self.var_dict.items():
+            if k1 in out_text:
+                index += 1
+                if v1['TYPE'] in ['df','dict','list','json']:
+                    replace_tag = f"ev{index}"
+                    out_text = out_text.replace(k1, f"eval_dict['{replace_tag}']")
+                    eval_dict[replace_tag] = v1['VALUE']
+                else:
+                    out_text = out_text.replace(k1, str(v1['VALUE']))
+        return out_text, eval_dict
     
     def verify_list_index_value(self, input_list: list, index: int, value: any=None, expected_elements: int=1) -> bool:
         success = True
@@ -191,74 +261,7 @@ class Workflow_PL_Service:
         elif input_list[index] == value:
             return True
         return False
-    
-    # DECLARE ==================================================
-    def _execute_declare(self, src_command_word_list: list):
-        print('DECLARE',src_command_word_list)
 
-        command_word_list = [str(value).upper() for value in src_command_word_list]
-        index = 1
-        var_name = command_word_list[index]
-        var_type = 'ANY'
-        var_value = None
-        index += 1
-        if self.verify_list_index_value(command_word_list, index, 'AS', 2):
-            var_type = command_word_list[index+1]
-            index += 2
-        if self.verify_list_index_value(command_word_list, index, '=', 2):
-            var_value = command_word_list[index+1]
-
-        if isinstance(var_value, str):
-            try:
-                float_value = float(var_value)
-                var_type = 'FLOAT'
-                if int(var_value) == float_value:
-                    var_type = 'INT'
-                    var_value = int(var_value)
-                else:
-                    var_value = float_value
-            except:
-                try: 
-                    var_value = bool(var_value)
-                    var_type = 'BOOL'
-                except:
-                    pass
-        self.fatal_error_check(var_name not in self.var_dict.keys(),reason="duplicate variable declaration",input=src_command_word_list)
-        self.var_dict[var_name] = {'type':var_type, 'value': var_value}
-        
-    def _execute_command(self, src_command_word_list: list):
-        if len(src_command_word_list) > 0:
-            if str(src_command_word_list[0]).upper() == 'DECLARE':
-                self._execute_declare(src_command_word_list)
-            elif src_command_word_list[0] in self.var_dict.keys():
-                print('assignment',src_command_word_list)
-            else:
-                print('no command found',src_command_word_list)
-
-    def _execute_step(self):
-        print('execute_step')
-        wf_item = self.workflow[self.workflow_index]
-        wf_word_dict = self.ps.text_to_token_dict(wf_item, hidden_delimiters=" \n", visible_delimiters=";()=-+/*")
-        wf_word_list = wf_word_dict['term_list']
-        print('wf_word_list',wf_word_list)
-
-        # in this step, do commands
-        step_index = 0
-        command_word_list = []
-        while step_index < len(wf_word_list):
-            current_step_word = wf_word_list[step_index]
-            if current_step_word == ";":
-                self._execute_command(command_word_list)
-                command_word_list = []
-            else:
-                command_word_list.append(current_step_word)
-            step_index += 1
-        self.workflow_index += 1
-
-    def execute(self, workflow: list) -> dict:
-        self.workflow_index = 0
-        self.workflow = workflow
-        while self.workflow_index < len(self.workflow):
-            self._execute_step()
-
-        self.fatal_error_check(False,reason="FORCED DUMP")
+    def evaluate(self, condition_statement:str) -> any:
+        statement, eval_dict = self.solve_eval_replacements(condition_statement)
+        return eval(statement)
