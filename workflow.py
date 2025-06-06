@@ -71,9 +71,9 @@ class Workflow_PL_Service:
         """
         parms: dict=<dict>, keep_scope=<list>, drop_scope=<list>
         """
-        target_dict: dict = self.ps.kwargs_lookup('dict',self.var_dict)
-        keep_scope: list = self.ps.kwargs_lookup('keep_scope',['global'])
-        drop_scope: list = self.ps.kwargs_lookup('drop_scope',[])
+        target_dict: dict = self.ps.kwargs_lookup('dict',self.var_dict, **kwargs)
+        keep_scope: list = self.ps.kwargs_lookup('keep_scope',['global'], **kwargs)
+        drop_scope: list = self.ps.kwargs_lookup('drop_scope',[], **kwargs)
 
         control_dict = target_dict.copy()
         for k, v in control_dict.items():
@@ -137,20 +137,21 @@ class Workflow_PL_Service:
         else:
             var_details = {}
 
-        if self.ps.kwargs_key_exists('scope'):
+
+        if self.ps.kwargs_key_exists('scope', **kwargs):
             var_details['SCOPE'] = kwargs['scope']
 
-        if self.ps.kwargs_key_exists('value'):
+        if self.ps.kwargs_key_exists('value', **kwargs):
             var_details['VALUE'] = kwargs['value']
 
-        if self.ps.kwargs_key_exists('system_missing'):
+        if self.ps.kwargs_key_exists('system_missing', **kwargs):
             var_details['SYSTEM_MISSING'] = kwargs['system_missing']
 
-        if self.ps.kwargs_key_exists('type'):
+        if self.ps.kwargs_key_exists('type', **kwargs):
             var_details['TYPE'] = str(kwargs['type']).lower()
         else:
-            if self.ps.kwargs_key_exists('system_missing') or self.ps.kwargs_key_exists('value'):
-                if self.ps.dict_key_exists(var_details, 'VALUE'):
+            if self.ps.kwargs_key_exists('system_missing', **kwargs) or self.ps.kwargs_key_exists('value', **kwargs):
+                if 'VALUE' in var_details:
                     value = var_details['VALUE']
                 else:
                     value = var_details['SYSTEM_MISSING']
@@ -164,10 +165,31 @@ class Workflow_PL_Service:
                 else: var_details['TYPE'] = "any"
 
                 if var_details['TYPE'] in ['df','dict','json','list']:
-                    if self.ps.kwargs_key_exists('value'):
+                    if self.ps.kwargs_key_exists('value', **kwargs):
                         var_details['VALUE'] = value.copy()
-                    if self.ps.kwargs_key_exists('system_missing'):
+                    if self.ps.kwargs_key_exists('system_missing', **kwargs):
                         var_details['SYSTEM_MISSING'] = value.copy()
+
+        self.var_dict[ready_key] = var_details
+    
+    def drop_var_value(self, **kwargs):
+        scope = self.ps.kwargs_lookup('scope', "", **kwargs)
+        key_list = self.ps.kwargs_lookup('keys', "", **kwargs)
+        temp_var_dict = self.var_dict.copy()
+        if len(scope) > 0:
+            for k,v in temp_var_dict.items():
+                if v['SCOPE'] == scope or k in key_list:
+                    del v['VALUE']
+                self.var_dict[k] = v
+
+    def get_var_details(self, key: str) -> any:
+        ready_key = self.sanitize_var_key(key)
+        if ready_key in self.var_dict.keys():
+            value_details = self.var_dict[ready_key]
+            return value_details
+        else:
+            print(f'DEBUG: no var details available: {key}')
+            exit(0)
 
     def get_var(self, key: str, system_missing: any=None) -> any:
         ready_key = self.sanitize_var_key(key)

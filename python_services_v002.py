@@ -178,13 +178,7 @@ class Parsing_Service:
         if local_debug: print(f"[210.99] type:{type(return_json)} success:{success} return:{return_json}")
         return success, return_json
     
-    def dict_lookup(self, target_dict: dict|str, find_key: dict|str, system_missing_value: any) -> any:
-        # flip the parameters on older calls
-        if isinstance(find_key, dict):
-            temp = find_key
-            find_key = target_dict
-            target_dict = temp
-
+    def dict_lookup(self, target_dict: dict, find_key: str, system_missing_value: any) -> any:
         if find_key not in target_dict.keys():
             return system_missing_value
         return target_dict[find_key]

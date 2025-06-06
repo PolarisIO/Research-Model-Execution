@@ -881,7 +881,7 @@ def model_research(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service
             # if DEBUG_APP: print(f"[104] type:{type(temp_dict)} payload:{temp_dict}")
             
             version_id = temp_dict['id']
-            wrkflw.set_var'</version_id/>', value=version_id)
+            wrkflw.set_var('</version_id/>', value=version_id)
             success, payload = ps.json_from_var(temp_dict['payload'])
             # if DEBUG_APP: print(f"[105] type:{type(payload)} payload:{payload}")
             workflow_instructions = payload['workflow']
@@ -999,8 +999,8 @@ def recursive_model_research_workflow(sql: Type[Database_Service], wrkflw: Type[
             # print(f"[debug: 'FOR' {for_list} sub_workflow: {sub_workflow}")
             # wrkflw.dump_var_dict()
 
-            for_item_key = value['ITEM']
             if 'IN_LIST' in value.keys():
+                for_item_key = value['ITEM']
                 # LIST PROCESSING
                 for_list = wrkflw.get_var(value['IN_LIST'],[])
                 for item in for_list:
@@ -1010,6 +1010,7 @@ def recursive_model_research_workflow(sql: Type[Database_Service], wrkflw: Type[
                     if not success: break
 
             elif 'IN_RANGE' in value.keys():
+                for_item_key = value['ITEM']
                 range_dict = value['IN_RANGE']
                 index = int(range_dict['FIRST'])
                 last = int(range_dict['LAST'])
@@ -1061,7 +1062,7 @@ def recursive_model_research_workflow(sql: Type[Database_Service], wrkflw: Type[
         # SQL gets the agnostic information to drive the query
         elif 'SQL' in current_instruction.keys():
             # {"SQL": {"QUERY": "<str>", "DATAFRAME": "DEFAULT"}}
-            dict_format = ps.dict_lookup('SQL', current_instruction)
+            dict_format = ps.dict_lookup(current_instruction, 'SQL', "")
             if isinstance(dict_format, str):
                 dict_format = {"QUERY": dict_format, "DATAFRAME": "SQL_DF"}
             elif not isinstance(dict_format, dict):
@@ -1076,8 +1077,9 @@ def recursive_model_research_workflow(sql: Type[Database_Service], wrkflw: Type[
             wrkflw.set_var(df_key, value=driver_df, type="df")
 
         elif 'SYSTEM_MISSING' in current_instruction.keys():
+
             # THIS COMMAND adds a key and value to the replacement dict and can be placed inside a loop before AI runs
-            system_missing_dict: dict = ps.dict_lookup('SYSTEM_MISSING', current_instruction)
+            system_missing_dict: dict = ps.dict_lookup(current_instruction, 'SYSTEM_MISSING', {})
             for key, value in system_missing_dict.items():
                 wrkflw.set_var(key, system_missing=value)
 
@@ -1105,30 +1107,31 @@ def recursive_model_research_workflow(sql: Type[Database_Service], wrkflw: Type[
                 exit(0)
         
         elif 'DROP_VAR_VALUE' in current_instruction.keys():
-            scope = ps.dict_lookup(store_dict,"SCOPE","set_var")
-            wrkflw.
-
+            # {"DROP_VAR_VALUE": {"SCOPE": "scope", "KEYS": <list>}}
+            # this command retains system_missing but removes values
+            drop_dict = current_instruction['DROP_VAR_VALUE']
+            scope = ps.dict_lookup(drop_dict,"SCOPE","")
+            keys = ps.dict_lookup(drop_dict,"KEYS","")
+            if scope != "":
+                wrkflw.drop_var_value(scope=scope)
+            if len(keys) > 0:
+                wrkflw.drop_var_value(keys=keys)
 
         elif 'IF' in current_instruction.keys():
             # {"IF": {"EXP": <eval(str)>, "TAG": "tag"} }
             # {"ELSE": "tag"}
             # {"END_IF": "tag" }
             if_dict: dict = current_instruction['IF']
-            expression: str = if_dict['EXP']
+            expression: str = if_dict['CONDITION']
             tag = if_dict['TAG']
-            sub_workflow, index = workflow_instruction_chain(instruction_list, index, 'END_IF', tag)
-            
-            then_workflow = {}
-            else_workflow = {}
-            then_flag = True
-            for key, value in sub_workflow:
-                if key == 'ELSE':
-                    if value == tag:
-                        then_flag = False
-                elif then_flag:
-                    then_workflow[key] = value
-                else:
-                    else_workflow[key] = value
+
+            sub_workflow, index = workflow_instruction_chain(instruction_list, index, 'END', end_tag)
+            # split_workflow
+            then_workflow, split_index =  workflow_instruction_chain(sub_workflow, 0, 'ELSE', end_tag)
+            if sub_workflow != then_workflow:
+                else_workflow, split_index = workflow_instruction_chain(sub_workflow, split_index, 'END', end_tag)
+            else:
+                else_workflow = []
 
             #evaluate the condition string
             if wrkflw.evaluate(expression):
@@ -1160,15 +1163,17 @@ def recursive_model_research_workflow(sql: Type[Database_Service], wrkflw: Type[
             if DEBUG_APP and local_debug: print(ai_response)
 
             # convert the response
-            if response_type == 'json':
+            print(f"[xxx: {response_type} {ai_response}]")
+            if response_type == 'JSON':
                 success, formatted_response = ps.json_from_var(ai_response)
-            elif response_type == 'dict':
+            elif response_type == 'DICT':
                 try:
                     formatted_response = ast.literal_eval(ai_response)
                     success = True
                 except:
                     formatted_response = {}
                     success = False
+
             if not success:
                 formatted_response = {invalid_form_key: ai_response}
                 
@@ -1251,7 +1256,7 @@ def recursive_model_research_workflow(sql: Type[Database_Service], wrkflw: Type[
                     else:
                         print(f"[390] FATAL: insert key definitions needed: {output_table_alias}")
                         exit(0)
-
+                print(f"[CHECKPOINT A: {sql_command}]")
                 if sql_command == "UPDATE":
                     # do an update
                     success, key = sql.update(table=output_table_name, where_key=key_columns[0], 
@@ -1264,8 +1269,8 @@ def recursive_model_research_workflow(sql: Type[Database_Service], wrkflw: Type[
                     if success: wrkflw.rows_written += 1
                         
         elif 'VERBOSE' in current_instruction.keys():
-            comment_text = wrkflw.var_text_replacement(current_instruction['COMMENT'])
-            print(f"recursive_model_research_workflow: COMMENT: {comment_text}")
+            comment_text = wrkflw.var_text_replacement(current_instruction['VERBOSE'])
+            print(f"recursive_model_research_workflow: VERBOSE: {comment_text}")
         elif 'END' in current_instruction.keys() or 'COMMENT' in current_instruction.keys():
             pass
         elif 'STOP' in current_instruction.keys():
@@ -1565,6 +1570,7 @@ def main():
     wrkflw.set_var('</$research_results$/>', value=f'signal.{sql.aws.target_env}_research_results', scope='global')
     wrkflw.set_var('</$client_entity_accounts$/>', value=f'signal.{sql.aws.target_env}_client_entity_accounts', scope='global')
     wrkflw.set_var('</$entity_aliases$/>', value=f'signal.{sql.aws.target_env}_entity_aliases', scope='global')
+    wrkflw.dump_var_dict()
 
     maintenance_df = fs.df_from_xlsx("app_config", 'maintenance')
     wip_dict = {}
@@ -1647,6 +1653,7 @@ def main():
                 # =====
                 df = fs.df_from_xlsx("app_config", 'ai_versions')
                 tablename = wrkflw.var_text_replacement('</$ai_model_versions$/>')
+                print(f"[sss]:{tablename}")
                 temp_alias_dict = df_to_table_using_CRUD(sql, df, tablename, 'id', 'ai_model_id', temp_alias_dict, [], debug=True)
                 # =====
                 df = fs.df_from_xlsx("app_config", 'client_subscriptions')
