@@ -61,6 +61,16 @@ class Workflow_PL_Service:
         self.ai_submit_count = 0
         self.rows_written = 0
 
+        # for xlsx 
+        self.page_break_key = None
+        self.last_page_break_value = None
+        self.page_data=[]
+        self.pages_written = 0
+        self.xlsx_memory = None
+        self.results_columns = []
+        self.out_file = ""
+        self.debug_mode = False
+        
         self.reset()
 
     def __del__(self):
@@ -102,6 +112,8 @@ class Workflow_PL_Service:
         self.set_var('$calendar_month_list$', value=['JANUARY','FEBRUARY','MARCH','APRIL','MAY','JUNE',
                                                             'JULY','AUGUST','SEPTEMBER','OCTOBER','NOVEMBER','DECEMBER'], scope="global")
         
+        self.set_var('$calendar_month_list$', value=['JANUARY','FEBRUARY','MARCH','APRIL','MAY'], scope="global")
+        
         if self.parent != None:
             for p_key, p_item in self.parent.var_dict:
                 self.var_dict[p_key] = p_item
@@ -137,7 +149,6 @@ class Workflow_PL_Service:
         else:
             var_details = {}
 
-
         if self.ps.kwargs_key_exists('scope', **kwargs):
             var_details['SCOPE'] = kwargs['scope']
 
@@ -155,14 +166,7 @@ class Workflow_PL_Service:
                     value = var_details['VALUE']
                 else:
                     value = var_details['SYSTEM_MISSING']
-                if isinstance(value, str): var_details['TYPE'] = "str"
-                elif isinstance(value, int): var_details['TYPE'] = "int"
-                elif isinstance(value, float): var_details['TYPE'] = "float"
-                elif isinstance(value, dict): var_details['TYPE'] = "dict"
-                elif isinstance(value, bool): var_details['TYPE'] = "bool"
-                elif isinstance(value, list): var_details['TYPE'] = "list"
-                elif isinstance(value, JSON): var_details['TYPE'] = "json"
-                else: var_details['TYPE'] = "any"
+                success, var_details['TYPE'] = self.ps.confirm_type(value)
 
                 if var_details['TYPE'] in ['df','dict','json','list']:
                     if self.ps.kwargs_key_exists('value', **kwargs):
@@ -174,12 +178,22 @@ class Workflow_PL_Service:
     
     def drop_var_value(self, **kwargs):
         scope = self.ps.kwargs_lookup('scope', "", **kwargs)
-        key_list = self.ps.kwargs_lookup('keys', "", **kwargs)
+        key_list = self.ps.kwargs_lookup('keys', [], **kwargs)
         temp_var_dict = self.var_dict.copy()
+        # print(f"drop_var_value: scope:{scope} keys:{key_list}")
         if len(scope) > 0:
             for k,v in temp_var_dict.items():
-                if v['SCOPE'] == scope or k in key_list:
+                k = self.sanitize_var_key(k)
+                if v['SCOPE'] == scope:
                     del v['VALUE']
+                self.var_dict[k] = v
+        if isinstance(key_list, dict):
+            key_list = list(key_list.keys())
+        for k in key_list:
+            k = self.sanitize_var_key(k)
+            if k in self.var_dict:
+                v = self.var_dict[k]
+                del v['VALUE']
                 self.var_dict[k] = v
 
     def get_var_details(self, key: str) -> any:
@@ -231,6 +245,16 @@ class Workflow_PL_Service:
             if 'VALUE' in var_details.keys():
                 if var_details['VALUE'] == var_value:
                     return True
+        return False
+
+    def does_var_value_exist(self, var_key: str) -> bool:
+        ready_key = self.sanitize_var_key(var_key)
+        if self.does_var_key_exist(ready_key):
+            details = self.var_dict[ready_key]
+            if 'VALUE' in details.keys():
+                return True
+            elif 'SYSTEM_MISSING' in details.keys():
+                return True
         return False
 
     def does_var_key_exist(self, var_key: str) -> bool:
@@ -285,4 +309,5 @@ class Workflow_PL_Service:
 
     def evaluate(self, condition_statement:str) -> any:
         statement, eval_dict = self.solve_eval_replacements(condition_statement)
+        
         return eval(statement)

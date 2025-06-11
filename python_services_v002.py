@@ -107,9 +107,47 @@ def console_input(ask: str, results: str="", **kwargs: any) -> str:
 class Parsing_Service:
     def __init__(self):
         self.intel_found_token_list = []
-        self.intel_found_token_dict = {} 
+        self.intel_found_token_dict = {}
 
-    def json_from_var(self, json_var: any, local_debug: bool=False) -> tuple[bool, JSON]:
+    def confirm_type(self, value: any, valid_list: list=[]) -> tuple[bool, str]:
+        lower_valid_list = []
+        for i in valid_list:
+            lower_valid_list.append(str(i).lower())
+        my_type = ""
+        if isinstance(value, str): my_type = "str"
+        elif isinstance(value, int): my_type = "int"
+        elif isinstance(value, float): my_type = "float"
+        elif isinstance(value, dict): my_type = "dict"
+        elif isinstance(value, bool): my_type = "bool"
+        elif isinstance(value, list): my_type = "list"
+        else:
+            try:
+                x = json.loads(value)
+                my_type = "json"
+            except:
+                my_type = "any"
+        if my_type in valid_list:
+            success = True
+        else:
+            success = False
+        return success, my_type
+    
+    def str_to_type(self, input_var: any) -> any:
+        if not isinstance(input_var, str):
+            return input_var
+        
+        try:
+            return json.loads(input_var)
+        except:
+            try:
+                return ast.literal_eval(input_var)
+            except:
+                print(f"[s201]:str_to_type:{input_var}{output_type}")
+                exit(0)
+        print(f"[s202]:str_to_type:{input_var}{output_type}")
+        exit(0)
+
+    def json_from_var(self, json_var: any, error_wrap: bool=False,local_debug: bool=False) -> tuple[bool, JSON]:
         """
         converts a variable to json
 
@@ -151,26 +189,30 @@ class Parsing_Service:
             json_var = json_var.replace('\\"','"')
             json_var = json_var.strip()
 
-            if local_debug: print(f"[210.2pre] is string {type(json_var)} >>{json_var}<<")  
+            if local_debug: print(f"[210.2pre] is string {type(json_var)} >>{json_var}<<")
             try:
                 return_json = json.loads(json_var, strict=False)
                 # return_json = json.loads(json_var)
                 success = True
             except:
-                print(f"[210.3] json.loads failed {json_var}")
-                # so the statement is probably malformed
-                left_bracket = json_var.count('[')
-                right_bracket = json_var.count(']')
-                left_curly = json_var.count('{')
-                right_curly = json_var.count('}')
-                doubles = json_var.count('"')
-                singles = json_var.count("'")
-                if left_bracket != right_bracket or left_curly != right_curly or (singles % 2) != 0 or (doubles % 2) != 0:
-                    print(f"FATAL malformed json: curly_bracket:{left_curly}!={right_curly} or brackets[]:{left_bracket}!={right_bracket} " + \
-                          f"single_quotes:{singles} double_quotes:{doubles} ")
-                print(ast.literal_eval(json_var))
-                print(f'try: https://jsonlint.com/')
-                exit(0)
+                if error_wrap:
+                    json_var = str(json_var).replace("'","")
+                    return self.json_from_var({"message": f"'{json_var}'"})
+                else:
+                    print(f"[210.3] json.loads failed {json_var}")
+                    # so the statement is probably malformed
+                    left_bracket = json_var.count('[')
+                    right_bracket = json_var.count(']')
+                    left_curly = json_var.count('{')
+                    right_curly = json_var.count('}')
+                    doubles = json_var.count('"')
+                    singles = json_var.count("'")
+                    if left_bracket != right_bracket or left_curly != right_curly or (singles % 2) != 0 or (doubles % 2) != 0:
+                        print(f"FATAL malformed json: curly_bracket:{left_curly}!={right_curly} or brackets[]:{left_bracket}!={right_bracket} " + \
+                            f"single_quotes:{singles} double_quotes:{doubles} ")
+                    print(ast.literal_eval(json_var))
+                    print(f'try: https://jsonlint.com/')
+                    exit(0)
         else:
             print(f"FATAL unknown json isinstance: Type: {type(json_var)} {json_var}")
             exit(0)
@@ -1561,6 +1603,8 @@ class Database_Service:
             v2fa2df_success = False
             v2fa2df_result = None
 
+        # print(f"[211.11] active_cursor_fetchall_to_df: columns:{v2fa2df_columns}")
+        # print(f"[211.11] active_cursor_fetchall_to_df: data:{v2fa2df_result}")
         v2fa2df_df = pd.DataFrame(columns=v2fa2df_columns, data=v2fa2df_result)
         if v2fa2df_dump:
             v2fa2df_row_count = 0

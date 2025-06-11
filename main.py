@@ -96,7 +96,7 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # =================================================
 ROOT = 'pcederstrom'
 AI_ONEDRIVE = 'OneDrive - Polaris I O/Engineering - Documents/Operations/Client Research Reports'
-AI_BATCH_LIMIT = 3
+AI_BATCH_LIMIT = 2000
 DEBUG_APP = True
 CATEGORY_LIST = ['Business Drivers', 'Business Strategies', 'Market Forces']
 MARKET_FORCES_LIST = ['Economy', 'Government', 'Competitors', 'Customers', 'Suppliers', 'Shareholders']
@@ -723,9 +723,9 @@ def execute_report_writer(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_
     local_debug = True
     query = f"Select t1.id as client_id, t2.model_id as model_id, " + \
             f"t2.state as state, t1.name as client_name, t2.report_label as report_label, " + \
-            f"t3.name as model_name, t2.report_payload as report_payload from </$ua_clients$/> t1 " + \
-            f"RIGHT join </$client_subscriptions$/> t2 on t1.id = t2.client_id " + \
-            f"inner join </$ai_models$/> t3 on t3.id = t2.model_id " + \
+            f"t3.name as model_name, t2.report_payload as report_payload from </$client_subscriptions$/> t2 " + \
+            f"LEFT join </$ua_clients$/> t1 on t1.id = t2.client_id " + \
+            f"LEFT join </$ai_models$/> t3 on t3.id = t2.model_id " + \
             f"where t2.created_on in (Select max(created_on) from </$client_subscriptions$/> group by client_id, model_id, report_label)"
     query = wrkflw.var_text_replacement(query)
     if local_debug: print('execute_report_writer', query)
@@ -733,60 +733,15 @@ def execute_report_writer(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_
             
     for report_index, report_row in report_df.iterrows():
         if report_row['state'] == 'ACTIVE':
-            success, report_payload = ps.json_from_var(report_row['report_payload'])
-            print(report_payload)
-            if 'report_break_key' in report_payload.keys():
-                page_break_key = report_payload['report_break_key']
-            else:
-                page_break_key = None
-            
-            query = report_payload['report_query']
-            if 'report_console' in report_payload.keys():
-                console_dict = report_payload['report_console']
-                value = console_input(console_dict['message'])
-                wrkflw.set_var(console_dict['key'], value=value)
-                
-            wrkflw.set_var('</client_id/>', value=report_row['client_id'])
-            wrkflw.set_var('</model_id/>', value=str(report_row['model_id']))
-            
-            query = wrkflw.var_text_replacement(query)
-            # print(f"RUNNING REPORT WITH: {query} \n===========")
-            success, results_df = sql.sql(query)
-            results_columns = results_df.columns.to_list()
+            wrkflw.set_var('model_id', value=report_row['model_id'])
+            wrkflw.set_var('model_name', value=ps.cleanse_string_nan(report_row['model_name']))
+            wrkflw.set_var('report_label', value=ps.cleanse_string_nan(report_row['report_label']))
+            wrkflw.set_var('client_name', value=ps.cleanse_string_nan(report_row['client_name']))
 
-            # setup the output_file
-            fs = File_Service()
-            fs.print_current_path()
-            fs.go_to_directory([ROOT, AI_ONEDRIVE])
-            out_file = f"{report_row['client_name']} {report_row['model_name']} Research Report {report_row['report_label']} {fs.ts.run_stamp} {fs.ts.run_stamp}.xlsx"
-            out_file = wrkflw.var_text_replacement(out_file)
-            xl_memory = pd.ExcelWriter(out_file)
-            pages_written = 0
-
-            last_page_break_value = None
-            page_data=[]
-            for results_index, results_row in results_df.iterrows():
-                if page_break_key != None:
-                    if results_row[page_break_key] != last_page_break_value and last_page_break_value != None:
-                        # write out page
-                        page_df = pd.DataFrame(page_data, columns=results_columns)
-                        if page_df.shape[0] > 0:
-                            pages_written += 1
-                            page_df.to_excel(xl_memory, sheet_name=last_page_break_value, columns=results_columns, index=False)
-                        page_data = []
-                    last_page_break_value = results_row[page_break_key]
-                page_row = []
-                for col in results_columns:
-                    page_row.append(results_row[col])
-                page_data.append(page_row)
-            
-            if page_break_key == None or last_page_break_value == None or pages_written == 0:
-                last_page_break_value = "Report"
-            page_df = pd.DataFrame(page_data, columns=results_columns)
-            if page_df.shape[0] > 0 or pages_written == 0:
-                page_df.to_excel(xl_memory, sheet_name=last_page_break_value, columns=results_columns, index=False)
-            xl_memory.close()
-            print(f"New Report: {out_file}")
+            wrkflw.set_var('report_break_key', value=None)
+            payload = json.loads(report_row['report_payload'])
+            workflow_instructions = payload['workflow']
+            success = recursive_instruction_workflow(sql, wrkflw, workflow_instructions)
 
 def get_version_major_minor(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service], model_id: str) -> list:
     # version_dict = {'active_major': 0,'active_minor': 0, 'last_major': 0, 'last_minor':0}
@@ -885,7 +840,7 @@ def model_research(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service
             success, payload = ps.json_from_var(temp_dict['payload'])
             # if DEBUG_APP: print(f"[105] type:{type(payload)} payload:{payload}")
             workflow_instructions = payload['workflow']
-            success = recursive_model_research_workflow(sql, wrkflw, workflow_instructions)
+            success = recursive_instruction_workflow(sql, wrkflw, workflow_instructions)
         if local_debug: print(f"model_research FINISH {ts.stopwatch()}: {model_dict}")
 
 def workflow_instruction_chain(instruction_list:list, index: int, stop_instruction: str, stop_value: str) -> tuple[list, int]:
@@ -933,38 +888,7 @@ def transform_string_to_number(input_string):
     except ValueError:
         return input_string  # Return original string if not a number
     
-def cond_evaluate(wrkflw: Type[Workflow_PL_Service], condition_list: list) -> bool:
-
-    if len(condition_list) == 3:
-        operand1 = condition_list[0]
-        operator = condition_list[1]
-        operand2 = condition_list[2]
-
-        if wrkflw.does_var_key_exist(operand1):
-            operand1 = wrkflw.get_var(operand1)
-        if wrkflw.does_var_key_exist(operand2):
-            operand2 = wrkflw.get_var(operand2)
-        
-        operand1 = transform_string_to_number(operand1)
-        operand2 = transform_string_to_number(operand2)
-        if operator in ["=","=="]: 
-            if operand1 == operand2: success = True
-        elif operator in [">"]:
-            if operand1 > operand2: success = True
-        elif operator in ["<"]:
-            if operand1 < operand2: success = True
-        elif operator in ["=>","=<"]:
-            if operand1 >= operand2: success = True
-        elif operator in ["<=","=<"]:
-            if operand1 <= operand2: success = True
-        elif operator in ["!="]:
-            if operand1 <= operand2: success = True
-        else:
-            print(f"[329] FATAL INVALID CONDITION STRUCTURE: {operand1}{operator}{operand2}")
-            exit(0)
-    return success
-
-def recursive_model_research_workflow(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service], instruction_list:list) -> bool:
+def recursive_instruction_workflow(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service], instruction_list:list) -> bool:
     ps: Type[Parsing_Service] = sql.aws.ps
     ts: Type[Timer_Service] = sql.aws.ts
 
@@ -976,11 +900,11 @@ def recursive_model_research_workflow(sql: Type[Database_Service], wrkflw: Type[
     # output_table_alias = '</$research_results$/>'
     # output_target_columns = []
 
-    success = True
+    page_output_file_opened = False
 
     index = 0
+    success = True
     while success and index < len(instruction_list):
-        
         current_instruction: dict = instruction_list[index]
         if local_debug: print(f"DEBUG: {current_instruction}")
         index += 1
@@ -1006,7 +930,7 @@ def recursive_model_research_workflow(sql: Type[Database_Service], wrkflw: Type[
                 for item in for_list:
                     # print(f"[debug: 'FOR ITEM' {item}")
                     wrkflw.set_var(for_item_key, value=item)
-                    success = recursive_model_research_workflow(sql, wrkflw, sub_workflow)
+                    success = recursive_instruction_workflow(sql, wrkflw, sub_workflow)
                     if not success: break
 
             elif 'IN_RANGE' in value.keys():
@@ -1021,7 +945,7 @@ def recursive_model_research_workflow(sql: Type[Database_Service], wrkflw: Type[
                 for item in for_list:
                     # print(f"[debug: 'FOR ITEM' {item}")
                     wrkflw.set_var(for_item_key, value=item)
-                    success = recursive_model_research_workflow(sql, wrkflw, sub_workflow)
+                    success = recursive_instruction_workflow(sql, wrkflw, sub_workflow)
                     if not success: break
 
             elif 'JSON' in value.keys():
@@ -1036,7 +960,7 @@ def recursive_model_research_workflow(sql: Type[Database_Service], wrkflw: Type[
                 for key, value in source_json.items():
                     wrkflw.set_var(destination_key, value=key, scope=scope)
                     wrkflw.set_var(destination_value, value=value, scope=scope)
-                    success = recursive_model_research_workflow(sql, wrkflw, sub_workflow)
+                    success = recursive_instruction_workflow(sql, wrkflw, sub_workflow)
                     if not success: 
                         break
                 wrkflw.var_reset(drop_scope=[scope])
@@ -1051,12 +975,12 @@ def recursive_model_research_workflow(sql: Type[Database_Service], wrkflw: Type[
                 for index, row in df.iterrows():
                     row_dict = row.to_dict()
                     wrkflw.set_var(row_destination_var, value=row_dict, type='dict', scope=scope)
-                    success = recursive_model_research_workflow(sql, wrkflw, sub_workflow, scope=scope)
+                    success = recursive_instruction_workflow(sql, wrkflw, sub_workflow)
                     if not success: break
                 wrkflw.var_reset(drop_scope=[scope])
 
             else:
-                print(f"recursive_model_research_workflow: BAD 'FOR' STRUCTURE: {current_instruction}")
+                print(f"recursive_instruction_workflow: BAD 'FOR' STRUCTURE: {current_instruction}")
                 exit(0)
         
         # SQL gets the agnostic information to drive the query
@@ -1066,7 +990,7 @@ def recursive_model_research_workflow(sql: Type[Database_Service], wrkflw: Type[
             if isinstance(dict_format, str):
                 dict_format = {"QUERY": dict_format, "DATAFRAME": "SQL_DF"}
             elif not isinstance(dict_format, dict):
-                print(f"recursive_model_research_workflow: BAD SQL FORMAT: {current_instruction}")
+                print(f"recursive_instruction_workflow: BAD SQL FORMAT: {current_instruction}")
                 exit(0)
 
             df_key = ps.dict_lookup(dict_format, 'DATAFRAME', "SQL_DF")
@@ -1107,15 +1031,24 @@ def recursive_model_research_workflow(sql: Type[Database_Service], wrkflw: Type[
                 exit(0)
         
         elif 'DROP_VAR_VALUE' in current_instruction.keys():
-            # {"DROP_VAR_VALUE": {"SCOPE": "scope", "KEYS": <list>}}
+            # {"DROP_VAR_VALUE": {"SCOPE": "scope"|"KEYS": <list>}|"VAR": "</var/>"}}
             # this command retains system_missing but removes values
             drop_dict = current_instruction['DROP_VAR_VALUE']
             scope = ps.dict_lookup(drop_dict,"SCOPE","")
-            keys = ps.dict_lookup(drop_dict,"KEYS","")
+            keys = ps.dict_lookup(drop_dict,"KEYS",[])
+            drop_var = ps.str_to_type(wrkflw.var_text_replacement(ps.dict_lookup(drop_dict,"VAR","")))
+
+            # print(f"drop_var:({type(drop_var)}) {drop_var}")
+            
             if scope != "":
                 wrkflw.drop_var_value(scope=scope)
             if len(keys) > 0:
                 wrkflw.drop_var_value(keys=keys)
+            if isinstance(drop_var, str):
+                if len(drop_var) > 0:
+                    wrkflw.drop_var_value(keys=[drop_var])
+            else:
+                wrkflw.drop_var_value(keys=drop_var)
 
         elif 'IF' in current_instruction.keys():
             # {"IF": {"EXP": <eval(str)>, "TAG": "tag"} }
@@ -1135,9 +1068,9 @@ def recursive_model_research_workflow(sql: Type[Database_Service], wrkflw: Type[
 
             #evaluate the condition string
             if wrkflw.evaluate(expression):
-                recursive_model_research_workflow(sql, wrkflw, then_workflow)
+                recursive_instruction_workflow(sql, wrkflw, then_workflow)
             else:
-                recursive_model_research_workflow(sql, wrkflw, else_workflow)
+                recursive_instruction_workflow(sql, wrkflw, else_workflow)
 
         elif 'AI' in current_instruction.keys():
             # {"AI": {"ENGINE":"OPENAI"|"PERPLEXITY", "PROMPT":"ask", 
@@ -1154,19 +1087,20 @@ def recursive_model_research_workflow(sql: Type[Database_Service], wrkflw: Type[
                 ai_client = Perplexity_Service(sql.aws)
             else:
                 ai_client = OpenAI_Service(sql.aws)
+            ai_client.conversation = ai_client.conversation_setup()
 
             # ASK AI THE QUESTION
             prompt = wrkflw.var_text_replacement(prompt_template)
-            if DEBUG_APP and local_debug: print(prompt)
+            if (DEBUG_APP and local_debug) or True: print(f"[AI_Q:] {prompt}")
             wrkflw.ai_submit_count += 1
             ai_response = ai_client.submit_inquiry(prompt)
             if DEBUG_APP and local_debug: print(ai_response)
 
             # convert the response
             print(f"[xxx: {response_type} {ai_response}]")
-            if response_type == 'JSON':
-                success, formatted_response = ps.json_from_var(ai_response)
-            elif response_type == 'DICT':
+            if str(response_type).upper() == 'JSON':
+                success, formatted_response = ps.json_from_var(ai_response, True)
+            elif str(response_type).upper() == 'DICT':
                 try:
                     formatted_response = ast.literal_eval(ai_response)
                     success = True
@@ -1174,16 +1108,27 @@ def recursive_model_research_workflow(sql: Type[Database_Service], wrkflw: Type[
                     formatted_response = {}
                     success = False
 
+            # validate that the formated response has KEYS
+            if success:
+                success, return_type = ps.confirm_type(formatted_response, ['json','dict'])
+
+            # if it is a list / str
             if not success:
                 formatted_response = {invalid_form_key: ai_response}
                 
             # save the response with a STATUS
             wrkflw.set_var(response_var_key, value=formatted_response)
+            success = True
+        
+        elif 'DEBUG_MODE' in current_instruction.keys():
+            wrkflw.debug_mode = True
 
         elif 'RECORD_RESEARCH' in current_instruction.keys():
-            # {"RECORD_RESEARCH": {"TARGET_TABLE": "</table_name/>"},
-            #                      "UPDATE_KEY_VALUE": {"KEY": "column_name", "VALUE": match_value},
-            #                      'TARGET_JSON', {"JSON_COLUMN": "fieldname", "JSON_KEYS": [keylist]},
+            # {"RECORD_RESEARCH": {"TARGET_TABLE": "</table_name/>",
+            #                      "UPDATE_KEY_VALUE": 
+            #                         {"KEY": "column_name", "VALUE": match_value},
+            #                      "TARGET_JSON": 
+            #                         {"JSON_COLUMN": "fieldname", "JSON_KEYS": [keylist],"JSON_DROP":"YES"},
             #                      "SQL_COMMAND": "INSERT"|"UPDATE"|"UPSERT"
             #                      }
             # }
@@ -1191,13 +1136,14 @@ def recursive_model_research_workflow(sql: Type[Database_Service], wrkflw: Type[
             output_table_alias = ps.dict_lookup(record_dict, 'TARGET_TABLE', '</$research_results$/>')
             output_table_name = wrkflw.var_text_replacement(output_table_alias)
 
-            update_key_dict: dict = ps.dict_lookup(record_dict, 'UPDATE_KEY_VALUE', {})
+            update_key_dict = ps.dict_lookup(record_dict, 'UPDATE_KEY_VALUE', {})
             update_key: str = ps.dict_lookup(update_key_dict, 'KEY', "")
-            update_value = ps.dict_lookup(update_key_dict, 'VALUE', "")
+            update_value = wrkflw.var_text_replacement(ps.dict_lookup(update_key_dict, 'VALUE', ""))
 
-            json_dict: dict = ps.dict_lookup(record_dict, 'TARGET_JSON', {})
+            json_dict = ps.dict_lookup(record_dict, 'TARGET_JSON', {})
             json_column: str = ps.dict_lookup(json_dict, 'JSON_COLUMN', "*")
             json_keys: str = ps.dict_lookup(json_dict, 'JSON_KEYS', [])
+            json_drop = ps.dict_lookup(json_dict, 'JSON_DROP', "NO")
 
             table_columns = ps.dict_lookup(record_dict, 'TABLE_COLUMNS', [])
             sql_command = ps.dict_lookup(record_dict, 'SQL_COMMAND', "UPSERT")
@@ -1209,12 +1155,14 @@ def recursive_model_research_workflow(sql: Type[Database_Service], wrkflw: Type[
                 record_exists = False
                 if update_key_dict != {}:
                     # check existance
-                    check_query = f"select {json_column} from {output_table_alias} where {update_key_dict['KEY']} = %(key_value)s"
-                    check_dict = {'key_value': update_key_dict['VALUE']}
+                    check_query = f"select {json_column} from {output_table_alias} where {update_key} = %(key_value)s"
+                    check_dict = {'key_value': update_value}
                     check_query = wrkflw.var_text_replacement(check_query)
+                    # print(f"[select234] {check_query}, {check_dict}")
                     # returns FALSE, if multiple_rows
                     result_df: pd.DataFrame
-                    record_exists, result_df = sql.select_to_df(query=check_query, data_dict=check_dict)
+                    # WHAT HAPPENS HERE IF JSON COLUMN == "*" ???
+                    record_exists, result_df = sql.select_to_df(query=check_query, query_dict=check_dict, columns=[json_column])
                     if record_exists:
                         if result_df.shape[0] == 0:
                             record_exists = False
@@ -1226,66 +1174,153 @@ def recursive_model_research_workflow(sql: Type[Database_Service], wrkflw: Type[
                         else:
                             sql_command = 'UPDATE'
                             success, payload_dict = sql.df_to_dict(result_df)
+                            # print(f"[select235] {success}, {payload_dict}")
                             if json_column == "*":
                                 json_payload = {}
                             else:
-                                json_payload = json.loads(payload_dict[json_column])
-                    else:
-                        sql_command = 'INSERT'
-                
-                # update the json_payload
-                for item in json_keys:
-                    if wrkflw.does_var_key_exist(item):
-                        json_payload[item] = wrkflw.get_var(item)
+                                if isinstance(payload_dict[json_column], str):
+                                    json_payload = json.loads(payload_dict[json_column])
+                                else:
+                                    json_payload = payload_dict[json_column]
+            else:
+                sql_command = 'INSERT'
+                json_payload = {}
+            
+            # print(f"B4 json_payload:{json_payload}")
 
-                # add the json_column to the data_dict                
-                if json_column != '*':
-                    data_dict = {json_column: json.dumps(json_payload)}
-                else:
-                    data_dict = {}
-                # build a data_dict from the key_list
-                for item in table_columns:
+            #drop items from the json_payload
+            if str(json_drop).upper() == "YES":
+                for item in json_keys:
+                    if item in json_payload:
+                        del json_payload[item]
+
+            # update the json_payload
+            for item in json_keys:
+                if wrkflw.does_var_value_exist(item):
+                    json_payload[item] = wrkflw.get_var(item)
+            
+            # wrkflw.dump_var_dict()
+            # print(f"UP json_payload:{json_payload}")
+            
+            # add the json_column to the data_dict                
+            if json_column != '*':
+                data_dict = {json_column: json.dumps(json_payload)}
+            else:
+                data_dict = {}
+
+            # build a data_dict from the key_list removing the json_column already added
+            for item in table_columns:
+                if item!= json_column:
                     if wrkflw.does_var_key_exist(item):
                         data_dict[item] = wrkflw.get_var(item)
 
-                if sql_command == "INSERT":
-                    if output_table_alias in ['</$research_results$/>','</$entity_metadata$/>']:
-                        key_columns = ['id']
-                        id_value = str(uuid4())
-                        data_dict['id'] = id_value
-                    else:
-                        print(f"[390] FATAL: insert key definitions needed: {output_table_alias}")
-                        exit(0)
-                print(f"[CHECKPOINT A: {sql_command}]")
+            if output_table_alias in ['</$research_results$/>','</$entity_metadata$/>']:
+                key_columns = ['id']
+            else:
+                print(f"[390] FATAL: insert key definitions needed: {output_table_alias}")
+                exit(0)
+
+            if not wrkflw.debug_mode:
                 if sql_command == "UPDATE":
-                    # do an update
-                    success, key = sql.update(table=output_table_name, where_key=key_columns[0], 
+                    # do an update or an upsert->changed to->update
+                    print(f"[321]:data_dict{data_dict}")
+                    data_dict[update_key] = update_value
+                    success, key = sql.update(table=output_table_name, where_key=update_key, 
                                                 data=data_dict)
                     if success: wrkflw.rows_written += 1
                 else:
-                    # do an insert
-                    # HERE HERE HERE NEED TO MAKE A KEY_COLUMNS FIELD >>>> DEBUG DEBUG
+                    # do an insert or an upsert->changed to->insert
+                    id_value = str(uuid4())
+                    data_dict['id'] = id_value
                     success, key = sql.insert_from_dict(table=output_table_name, key_columns=key_columns, 
                                                         data_columns=list(data_dict.keys()), data_dict=data_dict)
                     if success: wrkflw.rows_written += 1
-                        
+            else:
+                print(f"[DEBUG_MODE SKIP SQL STATEMENT: {sql_command}]")
+
         elif 'VERBOSE' in current_instruction.keys():
             comment_text = wrkflw.var_text_replacement(current_instruction['VERBOSE'])
-            print(f"recursive_model_research_workflow: VERBOSE: {comment_text}")
+            print(f"recursive_instruction_workflow: VERBOSE: {comment_text}")
         elif 'END' in current_instruction.keys() or 'COMMENT' in current_instruction.keys():
             pass
         elif 'STOP' in current_instruction.keys():
             print('FATAL END: STOP ENCOUNTERED IN INSTRUCTIONS')
             exit(0)
+        elif 'READ_XLSX' in current_instruction.keys():
+            # {"READ_XLSX": {"FILE_PREFIX": "", "FILE_SUFFIX": "xlsx", "SHEET":"sheet", "DATAFRAME": "DEFAULT_DF"} }
+            xlsx_dict = current_instruction['OUTPUT_XLSX_FILE']
+            filename_prefix = ps.dict_lookup(xlsx_dict, 'FILE_PREFIX', '')
+            filename_suffix = ps.dict_lookup(xlsx_dict, 'FILE_SUFFIX', '')
+            sheet_name = ps.dict_lookup(xlsx_dict, 'SHEET', 'Sheet1')
+            df_key = ps.dict_lookup(xlsx_dict, 'DATAFRAME', 'DEFAULT_DF')
+            
+            file_list = fs.get_file_list(filename_prefix, filename_suffix)
+            if len(file_list) == 0:
+                print(f"BAD FILE READ_XLSX INSTRUCTION: {current_instruction}")
+                exit(0)
+            
+            read_file = pd.ExcelFile(file_list[0])
+            read_sheets = list(read_file.sheet_names)
+            if sheet_name not in read_sheets:
+                print(f"BAD SHEET READ_XLSX INSTRUCTION: {current_instruction}")
+                exit(0)
+
+            driver_df = pd.read_excel(read_file, sheet_name=sheet_name)
+            wrkflw.set_var(df_key, value=driver_df, type="df")
+
+        elif 'OUTPUT_XLSX_FILE' in current_instruction.keys():
+            # "OUTPUT_XLSX_FILE": {"FILE_PREFIX": "</client_name/> </model_name/> Research Report </report_label/>", "TIMESTAMP": "YES", "PAGE_BREAK_ON": None}
+            xlsx_dict = current_instruction['OUTPUT_XLSX_FILE']
+            filename_prefix = ps.dict_lookup(xlsx_dict, 'FILE_PREFIX', 'RESEARCH REPORT')
+            include_timestamp = ps.dict_lookup(xlsx_dict, 'TIMESTAMP', 'YES')
+            wrkflw.page_break_key = ps.dict_lookup(xlsx_dict, 'PAGE_BREAK_ON', None)
+
+            fs = File_Service()
+            if include_timestamp == "YES":
+                wrkflw.out_file = f"{filename_prefix} {fs.ts.run_stamp}.xlsx"
+            else:
+                wrkflw.out_file = f"{filename_prefix}.xlsx"
+            # replace the vars and then remove any directory pathing that may be in the report name
+            wrkflw.out_file = str(wrkflw.var_text_replacement(wrkflw.out_file)).replace("/","").replace("\\","")
+            wrkflw.xlsx_memory = pd.ExcelWriter(wrkflw.out_file)
+            page_output_file_opened = True
+
+        elif 'WRITE_XLSX' in current_instruction.keys():
+            wrkflw.results_columns = ps.dict_lookup(current_instruction, 'WRITE_XLSX', [])
+            # we are processsing a row
+            if wrkflw.page_break_key != None:
+                page_break_value = wrkflw.get_var(wrkflw.page_break_key)
+                if page_break_value != wrkflw.last_page_break_value and wrkflw.last_page_break_value != None:
+                    # write out page    
+                    page_df = pd.DataFrame(wrkflw.page_data, columns=wrkflw.results_columns)
+                    wrkflw.page_data = []
+                    if page_df.shape[0] > 0:
+                        page_df.to_excel(wrkflw.xlsx_memory, sheet_name=wrkflw.last_page_break_value, columns=wrkflw.results_columns, index=False)
+                        wrkflw.pages_written += 1
+                wrkflw.last_page_break_value = page_break_value
+            page_row = []
+            for col in wrkflw.results_columns:
+                page_row.append(wrkflw.get_var(col))
+            wrkflw.page_data.append(page_row)
         else:
-            print(f'recursive_model_research_workflow: BAD WORKFLOW COMMAND', current_instruction)
+            print(f'recursive_instruction_workflow: BAD WORKFLOW COMMAND', current_instruction)
             exit(0)
 
-        """
-        if wrkflw.ai_submit_count > AI_BATCH_LIMIT and local_debug:
+        if wrkflw.rows_written > AI_BATCH_LIMIT:
             print("debug termination")
             exit(0)
-        """
+    
+    if (len(wrkflw.page_data) > 0 or wrkflw.pages_written > 0) and page_output_file_opened:
+        if wrkflw.page_break_key == None or wrkflw.last_page_break_value == None or wrkflw.pages_written == 0:
+            wrkflw.last_page_break_value = "Report"
+        page_df = pd.DataFrame(wrkflw.page_data, columns=wrkflw.results_columns)
+        if (page_df.shape[0] > 0 or wrkflw.pages_written == 0):
+            page_df.to_excel(wrkflw.xlsx_memory, sheet_name=wrkflw.last_page_break_value, columns=wrkflw.results_columns, index=False)
+            page_output_file_opened = True
+        if page_output_file_opened:
+            wrkflw.xlsx_memory.close()
+            print(f"New Report: {wrkflw.out_file}")
+    
     return success
 
 def entity_metadata_linking(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service]):
@@ -1480,7 +1515,13 @@ def df_to_table_using_CRUD(sql: Type[Database_Service], df: pd.DataFrame, tablen
         data_dict = {}
         for key in mv_row.keys():
             if key not in ['CRUD', TEMP_MODEL_ID_LINK] and key not in exclude_list:
-                data_dict[key] = mv_row[key]
+                # FIX to manage 'NaN' types where they should not be
+                cleansed_value = ps.cleanse_string_nan(mv_row[key])
+                if cleansed_value == "" and key in ['model_id']:
+                    pass
+                else:
+                    data_dict[key] = mv_row[key]
+
                 # if DEBUG_APP: print(f"[107c] {data_dict[key]}")
                 # handle JSON fields differently
                 if key in ['payload', 'report_payload']:
@@ -1554,13 +1595,25 @@ def update_config_tabs(df: pd.DataFrame, skip_columns:list, sheet: str, xlsx_tar
 # **** MAIN **** MAIN **** MAIN **** MAIN **** MAIN **** MAIN **** MAIN **** MAIN **** MAIN **** MAIN **** MAIN ****
 
 def main():
+
     fs = File_Service()
     fs.print_current_path("Research Model Execution")
     credentials_dict = fs.dict_from_xlsx("app_config", 'credentials')
     aws = AWS_Credentials_Service(credentials_dict['environment'], credentials_dict['user'], credentials_dict['password'])
-    
     sql = Database_Service(aws, 'db_airflow')
     wrkflw = Workflow_PL_Service(sql)
+ 
+    """
+    # AI TEST
+    prompt = "What metrics can you tell me about the Walmart High Tech Fulfillment Center at 1915 Ebberts Spring Court, Greencastle, PA?"
+    ai_client = Perplexity_Service(sql.aws)
+    # ai_client = OpenAI_Service(sql.aws)
+
+    print(f"[AI_Q:] {prompt}")
+    ai_response = ai_client.submit_inquiry(prompt)
+    print(ai_response)
+    exit(0)
+    """
 
     wrkflw.set_var('</$ua_clients$/>', value=f'signal.{sql.aws.target_env}_ua_clients', scope='global')
     wrkflw.set_var('</$client_subscriptions$/>', value=f'signal.{sql.aws.target_env}_client_subscriptions', scope='global')
@@ -1615,10 +1668,18 @@ def main():
                 print(aws.ts.timestamp("Start ENTITY METADATA RESEARCH EXECUTION"))
                 execute_research_for_entity_metadata(sql, wrkflw)
                 # ========================================================================================
-            elif str(action_row['Action']).upper() == 'CREATE RESEARCH REPORTS':
+            elif str(action_row['Action']).upper() == 'RUN RESEARCH REPORTS':
                 # THIS BLOCK OF CODE:  MAKES OUTPUT REPORTS
                 print(aws.ts.timestamp("Start REPORT WRITER"))
                 execute_report_writer(sql, wrkflw)
+                # ========================================================================================
+            elif str(action_row['Action']).upper() == 'ONE-OFF WORKFLOWS':
+                # THIS BLOCK OF CODE:  MAKES OUTPUT REPORTS
+                print(aws.ts.timestamp("Start ONE-OFF WORKFLOWS"))
+                workflow_df = fs.df_from_xlsx("app_config", 'one-off_workflows')
+                for row in workflow_df.iterrows():
+                    if row['CRUD'] == 'ACTIVE':
+                        success = recursive_instruction_workflow(sql, wrkflw, row['WORKFLOW'])
                 # ========================================================================================
             elif str(action_row['Action']).upper() == 'DUMP DATABASE TABLES TO WORKBOOK TABS':
                 # THIS BLOCK OF CODE:  MAKES OUTPUT REPORTS
