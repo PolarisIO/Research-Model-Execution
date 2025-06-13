@@ -4,6 +4,7 @@ openpyxl
 fuzz
 jellyfish
 fuzzywuzzy
+rapidfuzz
 requests
 
 docx2txt

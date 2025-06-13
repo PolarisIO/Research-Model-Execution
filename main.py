@@ -12,12 +12,6 @@ CLIENT MODEL REPORT REGISTRATION:
 - ADD A ENTITY_ACCOUNT_IDs to a CLIENT'S CLIENT_ENTITY_ACCOUNTS "ACTIVE", "INACTIVE"
 
 TODO LIST
-[ ] - test
-
-[ ] - Location entity model (first established date, Location closed date, longitude, latitude )
-[ ] - Location entity model by current month 
-
-[ ] - Client Entity Reports 
 [ ] - Entity Record Collapse
 [ ] - Entity Location Collapse
 
@@ -62,9 +56,7 @@ from dateutil.relativedelta import relativedelta
 import time
 import pandas as pd
 import numpy as np
-from fuzzywuzzy import fuzz
-import jellyfish
-from difflib import SequenceMatcher
+
 import string
 import requests
 import re
@@ -96,7 +88,7 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # =================================================
 ROOT = 'pcederstrom'
 AI_ONEDRIVE = 'OneDrive - Polaris I O/Engineering - Documents/Operations/Client Research Reports'
-AI_BATCH_LIMIT = 2000
+AI_BATCH_LIMIT = 5000
 DEBUG_APP = True
 CATEGORY_LIST = ['Business Drivers', 'Business Strategies', 'Market Forces']
 MARKET_FORCES_LIST = ['Economy', 'Government', 'Competitors', 'Customers', 'Suppliers', 'Shareholders']
@@ -887,10 +879,11 @@ def transform_string_to_number(input_string):
             return num  # Return as float if it has a decimal part
     except ValueError:
         return input_string  # Return original string if not a number
-    
+        
 def recursive_instruction_workflow(sql: Type[Database_Service], wrkflw: Type[Workflow_PL_Service], instruction_list:list) -> bool:
     ps: Type[Parsing_Service] = sql.aws.ps
     ts: Type[Timer_Service] = sql.aws.ts
+    fs: Type[File_Service] = File_Service()
 
     local_debug = False
 
@@ -1001,35 +994,69 @@ def recursive_instruction_workflow(sql: Type[Database_Service], wrkflw: Type[Wor
             wrkflw.set_var(df_key, value=driver_df, type="df")
 
         elif 'SYSTEM_MISSING' in current_instruction.keys():
-
             # THIS COMMAND adds a key and value to the replacement dict and can be placed inside a loop before AI runs
             system_missing_dict: dict = ps.dict_lookup(current_instruction, 'SYSTEM_MISSING', {})
             for key, value in system_missing_dict.items():
                 wrkflw.set_var(key, system_missing=value)
-
+        
+        elif 'INCREMENT' in current_instruction.keys():
+            inc_key = current_instruction['INCREMENT']
+            inc_value = wrkflw.get_var(inc_key) + 1
+            wrkflw.set_var(inc_key, value=inc_value)
+            
         elif 'SET_VAR' in current_instruction.keys():
-            # {"SET_VAR": {"DICT": dict_key, "KEYS": [list]} }
+            # {"SET_VAR": {"PARTITION":</value/>, "KEYS":[list], "SCOPE":<string>}
+            # {"SET_VAR": {"KEY":</value/>, "VALUE": <value>, "SCOPE:<string>"}
+            # if no keys listed then all keys are saved
             store_dict = current_instruction['SET_VAR']
             scope = ps.dict_lookup(store_dict,"SCOPE","set_var")
             if 'PARTITION' in store_dict.keys():
                 from_key = store_dict['PARTITION']
-                from_details = wrkflw.get_var_details(from_key)
+                # from_details = wrkflw.get_var_details(from_key)
                 from_value = wrkflw.get_var(from_key)
-                if 'KEY' in store_dict.keys():
-                    from_process_key_list = store_dict['KEYS']
-                else:
-                    if from_details['TYPE'] in ['dict','json']:
-                        from_process_key_list = list(from_value.keys())
-            
-
-                if from_details['TYPE'] in ['dict','json']:         
-                    for item in from_process_key_list:
-                        if item in from_value.keys():
-                            wrkflw.set_var(item, value=from_value[item], scope=scope)
+                from_process_key_list = ps.dict_lookup(store_dict,"KEYS",list(from_value.keys()))
+                for item in from_process_key_list:
+                    wrkflw.set_var(item, value=from_value[item], scope=scope)
+            elif 'KEY' in store_dict.keys():
+                set_key = store_dict['KEY']
+                set_val = store_dict['VALUE']
+                wrkflw.set_var(set_key, value=set_val, scope=scope)
             else:
                 print("FATAL SET VAR {current_instruction}")
                 exit(0)
+
+        elif "FN" in current_instruction.keys():
+            # {"FN": ["funciton_name, [arg_list], {kwargs_list}, return]}
+            # {"FN": ["pop", "</list/>", index, "set_var"]} # list removes front element, and places in set_var
+            # {"FN": ["df_column_to_list", "</df/>", "column", "col_list"]}  
+            fn_list = current_instruction['FN']
+            fn_callback = fn_list.pop(0)
+            callback = "fn_" + str(fn_callback).lower()
+            wrkflw.callback(fn_list)
         
+        elif "WHILE" in current_instruction.keys():
+            # HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE 
+            # {"WHILE": {"EVAL": "len(<address_list>) > 2", "WHILE_END": "WHILE_END"}
+            while_dict = current_instruction['WHILE']
+            eval_condition = while_dict["EVAL"]
+            end_tag = while_dict["WHILE_END"]
+            pass
+
+        elif "GET_LIST_ITEM" in current_instruction.keys():
+            # {"GET_LIST_ITEM": ["</id_list/>", "</index/>", "</target_id/>"] }
+            get_list = current_instruction['GET_LIST_ITEM']
+            item_key = get_list.pop(0)
+            index = get_list.pop(0)
+            target_key = get_list.pop(0)
+            list1 = wrkflw.get_var(item_key)
+            wrkflw.get_var(item_key, value=list1[index])
+
+        elif "INCREMENT" in current_instruction.keys():
+            # { "INCREMENT": "</index/>" }
+            item_key = current_instruction['INCREMENT']
+            index = wrkflw.get_var(item_key) + 1
+            wrkflw.get_var(item_key, value=index)
+
         elif 'DROP_VAR_VALUE' in current_instruction.keys():
             # {"DROP_VAR_VALUE": {"SCOPE": "scope"|"KEYS": <list>}|"VAR": "</var/>"}}
             # this command retains system_missing but removes values
@@ -1051,12 +1078,12 @@ def recursive_instruction_workflow(sql: Type[Database_Service], wrkflw: Type[Wor
                 wrkflw.drop_var_value(keys=drop_var)
 
         elif 'IF' in current_instruction.keys():
-            # {"IF": {"EXP": <eval(str)>, "TAG": "tag"} }
+            # {"IF": {"EVAL": <eval(str)>, "IF_END": "tag"} }
             # {"ELSE": "tag"}
-            # {"END_IF": "tag" }
+            # {"END": "tag" }
             if_dict: dict = current_instruction['IF']
-            expression: str = if_dict['CONDITION']
-            end_tag = if_dict['TAG']
+            expression: str = if_dict['EVAL']
+            end_tag = if_dict['IF_END']
 
             sub_workflow, index = workflow_instruction_chain(instruction_list, index, 'END', end_tag)
             # split_workflow
@@ -1089,6 +1116,10 @@ def recursive_instruction_workflow(sql: Type[Database_Service], wrkflw: Type[Wor
                 ai_client = OpenAI_Service(sql.aws)
             ai_client.conversation = ai_client.conversation_setup()
 
+            # 2025-06-13 Remove previous answers if they exist
+            if wrkflw.does_var_key_exist(response_var_key):
+                wrkflw.drop_var_value(keys=response_var_key)
+
             # ASK AI THE QUESTION
             prompt = wrkflw.var_text_replacement(prompt_template)
             if (DEBUG_APP and local_debug) or True: print(f"[AI_Q:] {prompt}")
@@ -1116,11 +1147,11 @@ def recursive_instruction_workflow(sql: Type[Database_Service], wrkflw: Type[Wor
             if not success:
                 formatted_response = {invalid_form_key: ai_response}
                 
-            # save the response with a STATUS
+            # save the response
             wrkflw.set_var(response_var_key, value=formatted_response)
             success = True
         
-        elif 'DEBUG_MODE' in current_instruction.keys():
+        elif 'DEBUG_MODE' in current_instruction.keys() or 'DEBUG' in current_instruction.keys():
             wrkflw.debug_mode = True
 
         elif 'RECORD_RESEARCH' in current_instruction.keys():
@@ -1248,7 +1279,7 @@ def recursive_instruction_workflow(sql: Type[Database_Service], wrkflw: Type[Wor
             exit(0)
         elif 'READ_XLSX' in current_instruction.keys():
             # {"READ_XLSX": {"FILE_PREFIX": "", "FILE_SUFFIX": "xlsx", "SHEET":"sheet", "DATAFRAME": "DEFAULT_DF"} }
-            xlsx_dict = current_instruction['OUTPUT_XLSX_FILE']
+            xlsx_dict = current_instruction['READ_XLSX']
             filename_prefix = ps.dict_lookup(xlsx_dict, 'FILE_PREFIX', '')
             filename_suffix = ps.dict_lookup(xlsx_dict, 'FILE_SUFFIX', '')
             sheet_name = ps.dict_lookup(xlsx_dict, 'SHEET', 'Sheet1')
@@ -1677,9 +1708,10 @@ def main():
                 # THIS BLOCK OF CODE:  MAKES OUTPUT REPORTS
                 print(aws.ts.timestamp("Start ONE-OFF WORKFLOWS"))
                 workflow_df = fs.df_from_xlsx("app_config", 'one-off_workflows')
-                for row in workflow_df.iterrows():
+                for index, row in workflow_df.iterrows():
                     if row['CRUD'] == 'ACTIVE':
-                        success = recursive_instruction_workflow(sql, wrkflw, row['WORKFLOW'])
+                        json_obj = json.loads(row['WORKFLOW'])
+                        success = recursive_instruction_workflow(sql, wrkflw, json_obj['workflow'])
                 # ========================================================================================
             elif str(action_row['Action']).upper() == 'DUMP DATABASE TABLES TO WORKBOOK TABS':
                 # THIS BLOCK OF CODE:  MAKES OUTPUT REPORTS

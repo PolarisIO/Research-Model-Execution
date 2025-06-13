@@ -22,6 +22,11 @@ import platform
 from uuid import uuid4, UUID
 import re
 import ast
+from rapidfuzz import fuzz as rapidfuzz
+# from fuzzywuzzy import fuzz as fuzzywuzzy
+from fuzzywuzzy import process
+import jellyfish
+from difflib import SequenceMatcher
 
 """
 TO DO:
@@ -108,6 +113,55 @@ class Parsing_Service:
     def __init__(self):
         self.intel_found_token_list = []
         self.intel_found_token_dict = {}
+
+    # =================================== STRING MATCHING RAPIDFUZZ
+    def fuzz_ratio(self, str1: str, str2: str) -> float:
+        """
+        ratio() calculates the Levenshtein Distance similarity ratio between two strings, 
+        returning a score between 0 and 100.
+        Levenshtein distance: number of single-character edits needed to change one 
+        string to another
+        """
+        return rapidfuzz.ratio(str1, str2)
+    
+    def fuzz_token_sort_ratio(self, str1: str, str2: str) -> float:
+        """
+        token_sort_ratio() splits the strings into tokens (words), 
+        sorts them alphabetically, and then compares them using ratio().
+        It is effective for strings with the same words in different orders.
+        returning a score between 0 and 100. 
+        """
+        return rapidfuzz.token_sort_ratio(str1, str2)
+    
+    def fuzz_token_set_order(self, str1: str, str2: str) -> float:
+        """
+        token_set_ratio() splits the strings into tokens and compares the intersection 
+        and remainder of these token sets. It's effective for strings with the same 
+        words in different orders, and also handles cases where one string is a 
+        subset of the other. 
+        """
+        return rapidfuzz.token_set_ratio(str1, str2)
+    
+    def fuzz_jaro_similarity(self, str1: str, str2: str) -> float:
+        """
+        Jaro similarity: measure of similarity between two strings
+        """
+        return jellyfish.jaro_similarity(str1, str2)
+    
+    def fuzz_extractOne(self, query: str, choices: list) -> tuple[str, float]:
+        """
+        process.extractOne(): Returns the best match and its score.
+        returns best_match, score
+        """
+        return process.extractOne(query, choices)
+    
+    def fuzz_extractMultiple(self, query: str, choices: list, limit: int) -> any:
+        """
+        UNTESTED ON RETURN
+        process.extract(): Returns a list of best matches and their scores, 
+        up to a specified limit.
+        """
+        return process.extract(query, choices, limit)
 
     def confirm_type(self, value: any, valid_list: list=[]) -> tuple[bool, str]:
         lower_valid_list = []
@@ -1038,6 +1092,7 @@ class AWS_Credentials_Service:
 
         # SECRET DICTIONARIES
         self.credentials = {}
+        self.secretname_env_value = {}
 
         if self.target_env == ENV_PROD:      # PRODUCTION
             self.user_pool_id = u"us-east-1_gqvXgXfdS"
@@ -1148,9 +1203,10 @@ class AWS_Credentials_Service:
                 aws_session_token=self.credentials["SessionToken"],
                 )
         # SECRETS MANAGER
-        self.client_secrets_manager = self.aws_create_boto3_service('secretsmanager')    
+        self.client_secrets_manager = self.aws_create_boto3_service('secretsmanager')
         self.client_s3 = self.aws_create_boto3_service('s3')
         self.client_dynamodb = self.aws_create_boto3_service('dynamodb')
+    
         
     def aws_create_boto3_service(self, service_name):
         # service_name = ['secretsmanager', 's3', 'dynamodb']
@@ -1166,6 +1222,9 @@ class AWS_Credentials_Service:
         :param secret_name: the AWS secret name
         :return: {secret_key : secret_value}
         """
+        if secret_name in self.secretname_env_value.keys():
+            return self.secretname_env_value[secret_name]
+
         # secret_name = "prod/PolarisAssist/OpenAI"
         try:
             aws_get_secret_value_response = self.client_secrets_manager.get_secret_value(SecretId=secret_name)
@@ -1177,7 +1236,10 @@ class AWS_Credentials_Service:
             raise e
             sys.exit(0)
         # Decrypts secret using the associated KMS key.
-        return json.loads(aws_get_secret_value_response['SecretString'])
+        secret_value = json.loads(aws_get_secret_value_response['SecretString'])
+        if secret_name not in self.secretname_env_value.keys():
+            self.secretname_env_value[secret_name] = secret_value
+        return secret_value
     
 class Replacement_Service:
     def __init__(self, aws: Type[AWS_Credentials_Service], parent_service: any=None):

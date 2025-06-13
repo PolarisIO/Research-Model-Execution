@@ -311,3 +311,34 @@ class Workflow_PL_Service:
         statement, eval_dict = self.solve_eval_replacements(condition_statement)
         
         return eval(statement)
+    
+    def fn_pop(self, fn_list):
+        list_key = fn_list.pop(0)
+        index = fn_list.pop(0)
+        return_key = fn_list.pop(0)
+
+        list1 = self.get_var(list_key)
+        self.set_var(return_key, value=list1.pop(index))
+        self.set_var(list_key, value=list1)
+
+    def fn_df_col_to_list(self, fn_list):
+        df_key = fn_list.pop(0)
+        df_col_name = fn_list.pop(0)
+        return_key = fn_list.pop(0)
+        
+        df = self.get_var(df_key)
+        col_val_list = df[df_col_name].to_list()
+        self.set_var(return_key, value=col_val_list)
+
+    def fn_fuzz_ratio_list(self, fn_list):
+        compare_key = fn_list.pop(0)
+        compare_list = fn_list.pop(0)
+        return_key = fn_list.pop(0)
+        return_scores = []
+        str1 = self.get_var(compare_key)
+        list1 = self.get_var(compare_list)
+
+        for item in list1:
+            return_scores.append(self.ps.fuzz_ratio(str1, item))
+        
+        self.set_var(return_key, value=return_scores)
