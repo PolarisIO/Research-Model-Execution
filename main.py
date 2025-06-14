@@ -895,24 +895,23 @@ def recursive_instruction_workflow(sql: Type[Database_Service], wrkflw: Type[Wor
 
     page_output_file_opened = False
 
-    index = 0
+    instruction_index = 0
     success = True
-    while success and index < len(instruction_list):
-        current_instruction: dict = instruction_list[index]
-        if local_debug: print(f"DEBUG: {current_instruction}")
-        index += 1
+    while success and instruction_index < len(instruction_list):
+        current_instruction: dict = instruction_list[instruction_index]
+        if local_debug: print(f"DEBUG: recursive: index:{instruction_index} next instruction: {current_instruction}")
+        instruction_index += 1
 
         # INSTRUCTION: {"FOR": {"FOR_END: "A", "ITEM": "</$state_item$/>"", "IN_LIST": "</$state_code_list$/>"} }
         # INSTRUCTION: {"FOR": {"FOR_END: "A", "ITEM": "</$state_item$/>"", "IN_RANGE": {"FIRST":int, "LAST":int} } }
-
         # INSTRUCTION: {'END': 'A'}
 
-        if 'FOR' in current_instruction.keys():
+        if "FOR" in current_instruction.keys():
             value: dict = current_instruction['FOR']
 
             # build the interior section to execute
             end_tag = ps.dict_lookup(value, 'FOR_END', "")
-            sub_workflow, index = workflow_instruction_chain(instruction_list, index, 'END', end_tag)
+            sub_workflow, instruction_index = workflow_instruction_chain(instruction_list, instruction_index, 'END', end_tag)
             # print(f"[debug: 'FOR' {for_list} sub_workflow: {sub_workflow}")
             # wrkflw.dump_var_dict()
 
@@ -1029,10 +1028,14 @@ def recursive_instruction_workflow(sql: Type[Database_Service], wrkflw: Type[Wor
             # {"FN": ["funciton_name, [arg_list], {kwargs_list}, return]}
             # {"FN": ["pop", "</list/>", index, "set_var"]} # list removes front element, and places in set_var
             # {"FN": ["df_column_to_list", "</df/>", "column", "col_list"]}  
-            fn_list = current_instruction['FN']
-            fn_callback = fn_list.pop(0)
-            callback = "fn_" + str(fn_callback).lower()
-            wrkflw.callback(fn_list)
+            fn_list = current_instruction['FN'].copy()
+            fn_callback = str(fn_list.pop(0)).lower()
+            if fn_callback == 'pop': wrkflw.fn_pop(fn_list)
+            elif fn_callback == 'df_col_to_list': wrkflw.fn_df_col_to_list(fn_list)
+            elif fn_callback == 'fuzzy_ratio_list': wrkflw.fn_fuzz_ratio_list(fn_list)
+            else:
+                print(f"[FN_ERR 000]: {current_instruction}")
+                exit(0)
         
         elif "WHILE" in current_instruction.keys():
             # HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE 
@@ -1040,22 +1043,35 @@ def recursive_instruction_workflow(sql: Type[Database_Service], wrkflw: Type[Wor
             while_dict = current_instruction['WHILE']
             eval_condition = while_dict["EVAL"]
             end_tag = while_dict["WHILE_END"]
-            pass
+            # build the interior section to execute
+            sub_workflow, instruction_index = workflow_instruction_chain(instruction_list, instruction_index, 'END', end_tag)
+
+            # print(f"[debug [100]: 'BEFORE WHILE' {eval_condition} sub_workflow: {sub_workflow}")
+            # print(f"wrkflw.evaluate(eval_condition):{wrkflw.evaluate(eval_condition)}  eval:{eval_condition}")
+            while(wrkflw.evaluate(eval_condition)):
+                # print(f"[debug [101]: 'WHILE' {eval_condition} sub_workflow: {sub_workflow}")
+                # print(f"wrkflw.evaluate(eval_condition:){wrkflw.evaluate(eval_condition)}  eval:{eval_condition}")
+                # wrkflw.dump_var_dict()
+                success = recursive_instruction_workflow(sql, wrkflw, sub_workflow)
+                if not success: break
 
         elif "GET_LIST_ITEM" in current_instruction.keys():
-            # {"GET_LIST_ITEM": ["</id_list/>", "</index/>", "</target_id/>"] }
+            # {"GET_LIST_ITEM": ["</id_list/>", "</instruction_index/>", "</target_id/>"] }
             get_list = current_instruction['GET_LIST_ITEM']
-            item_key = get_list.pop(0)
-            index = get_list.pop(0)
-            target_key = get_list.pop(0)
+            item_key = get_list[0]
+            index_key = get_list[1]
+            # this statement says if we pass in a hard value: like "2" then it is the system missing
+            index_value = int(wrkflw.get_var(index_key,index_key))
+            target_key = get_list[2]
             list1 = wrkflw.get_var(item_key)
-            wrkflw.get_var(item_key, value=list1[index])
+            # print(f"wtf:{target_key} index:{index_value} list:{list1}")
+            wrkflw.set_var(target_key, value=list1[index_value])
 
         elif "INCREMENT" in current_instruction.keys():
             # { "INCREMENT": "</index/>" }
             item_key = current_instruction['INCREMENT']
             index = wrkflw.get_var(item_key) + 1
-            wrkflw.get_var(item_key, value=index)
+            wrkflw.set_var(item_key, value=index)
 
         elif 'DROP_VAR_VALUE' in current_instruction.keys():
             # {"DROP_VAR_VALUE": {"SCOPE": "scope"|"KEYS": <list>}|"VAR": "</var/>"}}
@@ -1085,7 +1101,7 @@ def recursive_instruction_workflow(sql: Type[Database_Service], wrkflw: Type[Wor
             expression: str = if_dict['EVAL']
             end_tag = if_dict['IF_END']
 
-            sub_workflow, index = workflow_instruction_chain(instruction_list, index, 'END', end_tag)
+            sub_workflow, instruction_index = workflow_instruction_chain(instruction_list, instruction_index, 'END', end_tag)
             # split_workflow
             then_workflow, split_index =  workflow_instruction_chain(sub_workflow, 0, 'ELSE', end_tag)
             if sub_workflow != then_workflow:
@@ -1272,6 +1288,10 @@ def recursive_instruction_workflow(sql: Type[Database_Service], wrkflw: Type[Wor
         elif 'VERBOSE' in current_instruction.keys():
             comment_text = wrkflw.var_text_replacement(current_instruction['VERBOSE'])
             print(f"recursive_instruction_workflow: VERBOSE: {comment_text}")
+            """
+            wrkflw.verbose_count += 1
+            if wrkflw.verbose_count > 100: exit(0)
+            """
         elif 'END' in current_instruction.keys() or 'COMMENT' in current_instruction.keys():
             pass
         elif 'STOP' in current_instruction.keys():
@@ -1709,7 +1729,7 @@ def main():
                 print(aws.ts.timestamp("Start ONE-OFF WORKFLOWS"))
                 workflow_df = fs.df_from_xlsx("app_config", 'one-off_workflows')
                 for index, row in workflow_df.iterrows():
-                    if row['CRUD'] == 'ACTIVE':
+                    if str(row['RUN']).upper() in ['ACTIVE','YES','TRUE','GO']:
                         json_obj = json.loads(row['WORKFLOW'])
                         success = recursive_instruction_workflow(sql, wrkflw, json_obj['workflow'])
                 # ========================================================================================

@@ -49,6 +49,7 @@ class Workflow_PL_Service:
         self.return_dict: dict = {}
         self.workflow = []
         self.workflow_index = 0
+        self.verbose_count = 0
 
         self.replace_status_dict = {}
 
@@ -313,27 +314,27 @@ class Workflow_PL_Service:
         return eval(statement)
     
     def fn_pop(self, fn_list):
-        list_key = fn_list.pop(0)
-        index = fn_list.pop(0)
-        return_key = fn_list.pop(0)
+        list_key = fn_list[0]
+        index = fn_list[1]
+        return_key = fn_list[2]
 
         list1 = self.get_var(list_key)
         self.set_var(return_key, value=list1.pop(index))
         self.set_var(list_key, value=list1)
 
     def fn_df_col_to_list(self, fn_list):
-        df_key = fn_list.pop(0)
-        df_col_name = fn_list.pop(0)
-        return_key = fn_list.pop(0)
+        df_key = fn_list[0]
+        df_col_name = fn_list[1]
+        return_key = fn_list[2]
         
         df = self.get_var(df_key)
         col_val_list = df[df_col_name].to_list()
         self.set_var(return_key, value=col_val_list)
 
     def fn_fuzz_ratio_list(self, fn_list):
-        compare_key = fn_list.pop(0)
-        compare_list = fn_list.pop(0)
-        return_key = fn_list.pop(0)
+        compare_key = fn_list[0]
+        compare_list = fn_list[1]
+        return_key = fn_list[2]
         return_scores = []
         str1 = self.get_var(compare_key)
         list1 = self.get_var(compare_list)
