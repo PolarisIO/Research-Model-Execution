@@ -1729,7 +1729,7 @@ def main():
                 print(aws.ts.timestamp("Start ONE-OFF WORKFLOWS"))
                 workflow_df = fs.df_from_xlsx("app_config", 'one-off_workflows')
                 for index, row in workflow_df.iterrows():
-                    if str(row['RUN']).upper() in ['ACTIVE','YES','TRUE','GO']:
+                    if str(row['RUN']).upper() in ['ACTIVE','YES','TRUE','GO','RUN']:
                         json_obj = json.loads(row['WORKFLOW'])
                         success = recursive_instruction_workflow(sql, wrkflw, json_obj['workflow'])
                 # ========================================================================================
